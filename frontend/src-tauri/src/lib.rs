@@ -1,6 +1,9 @@
 #[allow(unused_imports)]
 use tauri_plugin_shell::ShellExt;
+#[allow(unused_imports)]
 use tauri_plugin_updater::UpdaterExt;
+#[allow(unused_imports)]
+use tauri::Manager;
 
 #[derive(serde::Serialize)]
 pub struct UpdateInfo {
