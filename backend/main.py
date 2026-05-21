@@ -19,6 +19,30 @@ import platform_utils
 # there is no system ffmpeg, so without this PATH injection every audio
 # ingest raises [WinError 2]. Must run before whisper.transcribe() ever.
 platform_utils.ensure_ffmpeg_on_path()
+
+# CUDA diagnostics — surface GPU detection state in backend.log on every
+# startup so users / bug reports can distinguish: CPU wheel got installed,
+# CUDA DLL missing, driver problem, or correctly using GPU.
+def _log_cuda_state() -> None:
+    try:
+        import torch as _t
+        print(f"[cuda] torch={_t.__version__}", flush=True)
+        print(f"[cuda] torch.version.cuda={_t.version.cuda}", flush=True)
+        print(f"[cuda] cuda.is_available={_t.cuda.is_available()}", flush=True)
+        print(f"[cuda] cuda.device_count={_t.cuda.device_count()}", flush=True)
+        print(f"[cuda] cudnn.is_available={_t.backends.cudnn.is_available()}", flush=True)
+        if _t.cuda.is_available():
+            print(f"[cuda] device_name={_t.cuda.get_device_name(0)}", flush=True)
+        else:
+            try:
+                _t.cuda.init()
+            except Exception as exc:
+                print(f"[cuda] init() error: {exc!r}", flush=True)
+    except Exception as exc:
+        print(f"[cuda] diagnostic crashed: {exc!r}", flush=True)
+
+
+_log_cuda_state()
 import hls_stream
 import json
 import mimetypes
