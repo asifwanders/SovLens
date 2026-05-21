@@ -1,24 +1,91 @@
 "use client";
 
 import { motion, AnimatePresence } from "framer-motion";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
+
+const API = "http://127.0.0.1:14793";
+const POLL_MS = 1500;
+const MIN_VISIBLE_MS = 800; // never flash too fast
+const BACKEND_GRACE_MS = 30_000; // give sidecar this long to come up
+
+type ClipStatus = {
+  name: string;
+  loaded: boolean;
+  downloaded: boolean;
+};
 
 export default function SplashScreen({ onComplete }: { onComplete: () => void }) {
   const [isVisible, setIsVisible] = useState(true);
   const [mounted, setMounted] = useState(false);
+  const [status, setStatus] = useState<"booting" | "downloading" | "ready" | "error">("booting");
+  const [statusMsg, setStatusMsg] = useState<string>("Starting backend…");
+  const mountedAt = useRef<number>(Date.now());
+  const warmupFired = useRef(false);
 
   useEffect(() => {
     setMounted(true);
-    const timer = setTimeout(() => {
-      setIsVisible(false);
-      setTimeout(onComplete, 800); // Wait for exit animation
-    }, 2000); // Show splash for 2 seconds
-    return () => clearTimeout(timer);
+    let cancelled = false;
+
+    const dismiss = () => {
+      const elapsed = Date.now() - mountedAt.current;
+      const wait = Math.max(0, MIN_VISIBLE_MS - elapsed);
+      setTimeout(() => {
+        if (cancelled) return;
+        setIsVisible(false);
+        setTimeout(onComplete, 800);
+      }, wait);
+    };
+
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        const res = await fetch(`${API}/models/status`, { cache: "no-store" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = (await res.json()) as { clip: ClipStatus };
+        const clip = data.clip;
+
+        if (clip.downloaded) {
+          setStatus("ready");
+          setStatusMsg("Ready");
+          dismiss();
+          return;
+        }
+
+        // Backend up, model not yet downloaded — fire warmup once.
+        if (!warmupFired.current) {
+          warmupFired.current = true;
+          fetch(`${API}/models/warmup`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ model: "clip" }),
+          }).catch(() => {
+            /* polled status will catch any backend error */
+          });
+        }
+        setStatus("downloading");
+        setStatusMsg("Downloading visual search model (~890 MB)…");
+      } catch {
+        // Backend not yet reachable. Show booting until grace expires.
+        const elapsed = Date.now() - mountedAt.current;
+        if (elapsed > BACKEND_GRACE_MS) {
+          setStatus("error");
+          setStatusMsg("Backend not responding. Check Settings → Logs.");
+        }
+      } finally {
+        if (!cancelled) {
+          setTimeout(poll, POLL_MS);
+        }
+      }
+    };
+
+    poll();
+
+    return () => {
+      cancelled = true;
+    };
   }, [onComplete]);
 
-  // Render via portal to document.body so the splash overlays sidebar + main
-  // regardless of where in the React tree this component is mounted.
   if (!mounted) return null;
 
   return createPortal(
@@ -35,11 +102,47 @@ export default function SplashScreen({ onComplete }: { onComplete: () => void })
             animate={{ scale: 1, opacity: 1, y: 0 }}
             exit={{ scale: 1.1, opacity: 0, y: -20 }}
             transition={{ duration: 0.8, ease: "easeOut" }}
-            className="flex flex-col items-center"
+            className="flex flex-col items-center max-w-md px-6"
           >
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src="/logo-wordmark.png" alt="SovLens" className="h-24 mb-4" />
-            <p className="text-muted-text tracking-widest uppercase text-sm font-medium">by sovstac</p>
+            <p className="text-muted-text tracking-widest uppercase text-sm font-medium mb-10">
+              by sovstac
+            </p>
+
+            {/* Progress / status block */}
+            <div className="w-full">
+              {(status === "booting" || status === "downloading") && (
+                <div className="h-1 w-full bg-black/10 dark:bg-white/10 rounded-full overflow-hidden mb-3">
+                  <motion.div
+                    className="h-full w-1/3 bg-accent"
+                    animate={{ x: ["-100%", "300%"] }}
+                    transition={{
+                      duration: 1.4,
+                      repeat: Infinity,
+                      ease: "easeInOut",
+                    }}
+                  />
+                </div>
+              )}
+              <p className="text-center text-sm text-muted-text">{statusMsg}</p>
+              {status === "downloading" && (
+                <p className="text-center text-xs text-muted-text/70 mt-2">
+                  First-launch only. Future launches start instantly.
+                </p>
+              )}
+              {status === "error" && (
+                <button
+                  onClick={() => {
+                    setIsVisible(false);
+                    setTimeout(onComplete, 400);
+                  }}
+                  className="mt-4 mx-auto block text-xs text-accent hover:underline"
+                >
+                  Continue anyway
+                </button>
+              )}
+            </div>
           </motion.div>
         </motion.div>
       )}
