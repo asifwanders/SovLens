@@ -131,7 +131,13 @@ def _extract_single_frame(
         _FFMPEG_EXE, "-y", "-ss", str(timestamp), "-i", video_path,
         "-vframes", "1", "-q:v", "2", out_file,
     ]
-    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "timeout": 60}
+    if platform_utils.IS_WINDOWS:
+        kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+    try:
+        result = subprocess.run(cmd, **kwargs)
+    except subprocess.TimeoutExpired:
+        return False
     return result.returncode == 0 and os.path.exists(out_file)
 
 

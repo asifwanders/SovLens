@@ -160,6 +160,11 @@ Persistent context for future sessions. Update when you discover new traps.
 10. **`localhost` on Windows resolves IPv6 `::1` first** — uvicorn binds IPv4 only → 1-2s delay or refused. Use `127.0.0.1` in all frontend fetch URLs
 11. **Tauri file picker `filters` with too many extensions in one group** — Windows `IFileDialog` may reject. Split into multiple filter groups + add `All Files: *` fallback
 12. **`app.path().resolve("sovlens-backend", Resource)` returns bare name without `.exe` on Win** — bundled file is `sovlens-backend.exe` so metadata() fails → 4KB guard skips spawn. Never pre-flight by literal name; let `app.shell().sidecar(name)` do OS-aware resolution and log any error
+13. **PyInstaller `excludes=["unittest"]` crashes torch on import** — `torch.utils._config_module` does `import unittest` at module load. Never exclude `unittest` from the spec. Defensively force-include `unittest`, `unittest.mock`, `pkg_resources`, `sqlite3`, `importlib.metadata`
+14. **Hand-listed `hiddenimports` for torch is fragile** — use `collect_all('torch')` (and torchvision/transformers/ultralytics/easyocr/whisper/lancedb/scenedetect) so lazy submodules + DLLs come along
+15. **PyInstaller `upx=True` on Win** — Defender heuristic flag + corrupts torch DLLs. Always `upx=False` for Win bundles with torch
+16. **Subprocess spawned from PyInstaller `console=False` GUI app pops `conhost.exe` window on each child** — set `creationflags=0x08000000` (CREATE_NO_WINDOW) in `subprocess.run` on Windows
+17. **Tauri NSIS defaults to `perMachine`** requiring admin → SmartScreen + UAC double-prompt. Set `bundle.windows.nsis.installMode: "currentUser"`
 
 ---
 

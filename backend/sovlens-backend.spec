@@ -8,49 +8,37 @@
 import sys
 import os
 
+from PyInstaller.utils.hooks import collect_all, collect_submodules
+
 block_cipher = None
+
+# Torch + adjacent: use collect_all so every lazy submodule, data file,
+# and native DLL is bundled. Hand-listing reliably misses things like
+# torch._dynamo, torch.distributed.config, MKL DLLs on Win, etc.
+torch_datas, torch_binaries, torch_hidden = collect_all("torch")
+tv_datas, tv_binaries, tv_hidden = collect_all("torchvision")
+tr_datas, tr_binaries, tr_hidden = collect_all("transformers")
+st_datas, st_binaries, st_hidden = collect_all("sentence_transformers")
+ul_datas, ul_binaries, ul_hidden = collect_all("ultralytics")
+eo_datas, eo_binaries, eo_hidden = collect_all("easyocr")
+wh_datas, wh_binaries, wh_hidden = collect_all("whisper")
+ld_datas, ld_binaries, ld_hidden = collect_all("lancedb")
+sd_datas, sd_binaries, sd_hidden = collect_all("scenedetect")
 
 # ------------------------------------------------------------------
 # Hidden imports — libraries that PyInstaller can't auto-detect
 # because they are loaded at runtime, via plugins, or via C extensions.
 # ------------------------------------------------------------------
 HIDDEN_IMPORTS = [
-    # LanceDB / Arrow
-    "lancedb",
-    "lancedb.table",
-    "lancedb.index",
-    "lancedb.embeddings",
+    # pyarrow (LanceDB picked up via collect_all)
     "pyarrow",
     "pyarrow.lib",
     "pyarrow._compute",
     "pyarrow._csv",
     "pyarrow._json",
     "pyarrow._parquet",
-    # Sentence Transformers / HuggingFace
-    "sentence_transformers",
-    "sentence_transformers.models",
-    "sentence_transformers.losses",
-    "transformers",
-    "transformers.models.clip",
+    # tokenizers (transformers picked up via collect_all)
     "tokenizers",
-    # EasyOCR
-    "easyocr",
-    "easyocr.detection",
-    "easyocr.recognition",
-    # Whisper
-    "whisper",
-    "whisper.model",
-    "whisper.audio",
-    "whisper.tokenizer",
-    # Ultralytics YOLO
-    "ultralytics",
-    "ultralytics.nn",
-    "ultralytics.models",
-    "ultralytics.utils",
-    # SceneDetect
-    "scenedetect",
-    "scenedetect.detectors",
-    "scenedetect.video_manager",
     # imageio / ffmpeg
     "imageio_ffmpeg",
     "imageio_ffmpeg._utils",
@@ -58,7 +46,7 @@ HIDDEN_IMPORTS = [
     "PIL",
     "PIL.Image",
     "pillow_heif",
-    # FastAPI / Uvicorn
+    # FastAPI / Uvicorn — uvicorn picks worker types at runtime
     "fastapi",
     "fastapi.middleware.cors",
     "uvicorn",
@@ -73,41 +61,62 @@ HIDDEN_IMPORTS = [
     "pydantic.v1",
     # OpenCV (headless)
     "cv2",
-    # Torch / numpy
-    "torch",
-    "torchvision",
     "numpy",
     # Scipy
     "scipy",
     "scipy.spatial.transform._rotation_groups",
-    # Misc stdlib / internal
-    "email.mime.multipart",
-    "email.mime.text",
-    "pkg_resources.py2_warn",
+    # ASGI / HTTP
     "anyio",
     "anyio._backends._asyncio",
     "starlette",
     "starlette.middleware.cors",
     "multipart",
     "httpx",
-]
+    # Stdlib modules PyInstaller's modulegraph marks "conditional" but
+    # torch/transformers/ultralytics actually import. Force-include.
+    "unittest",
+    "unittest.mock",
+    "unittest.case",
+    "unittest.util",
+    "pkg_resources",
+    "pkg_resources.extern",
+    "pkg_resources.py2_warn",
+    "pydoc",
+    "doctest",
+    "inspect",
+    "sqlite3",
+    "importlib.metadata",
+    "importlib.resources",
+    "xml.etree.ElementTree",
+    "csv",
+    "shelve",
+    "email.mime.multipart",
+    "email.mime.text",
+] + torch_hidden + tv_hidden + tr_hidden + st_hidden + ul_hidden + eo_hidden + wh_hidden + ld_hidden + sd_hidden
 
 a = Analysis(
     # Entry point — relative to spec file location (backend/).
     ["main.py"],
     pathex=[],
-    binaries=[],
-    datas=[],
+    binaries=(
+        torch_binaries + tv_binaries + tr_binaries + st_binaries
+        + ul_binaries + eo_binaries + wh_binaries + ld_binaries + sd_binaries
+    ),
+    datas=(
+        torch_datas + tv_datas + tr_datas + st_datas
+        + ul_datas + eo_datas + wh_datas + ld_datas + sd_datas
+    ),
     hiddenimports=HIDDEN_IMPORTS,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
         # Keep the bundle lean — tests and scratch are never needed at runtime.
+        # CRITICAL: do NOT exclude "unittest" — torch.utils._config_module
+        # imports it at module load and the frozen exe will crash on start.
         "tests",
         "scratch",
         "pytest",
-        "unittest",
         "IPython",
         "ipykernel",
         "notebook",
@@ -133,7 +142,9 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # upx=True triggers Windows Defender heuristic + corrupts some torch
+    # DLLs on Win. Net <5% size gain; disabled.
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     # console=False suppresses the terminal popup on Windows.

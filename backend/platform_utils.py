@@ -214,6 +214,11 @@ def run_subprocess(cmd: List[str], **kwargs) -> subprocess.CompletedProcess:
     kwargs.setdefault("errors", "replace")
     kwargs.setdefault("text", True)
     kwargs.setdefault("capture_output", True)
+    # PyInstaller console=False + GUI-only Tauri parent means each child
+    # spawned without CREATE_NO_WINDOW pops a conhost window. Suppress
+    # at the source.
+    if IS_WINDOWS:
+        kwargs.setdefault("creationflags", 0x08000000)  # CREATE_NO_WINDOW
     return subprocess.run(cmd, **kwargs)
 
 

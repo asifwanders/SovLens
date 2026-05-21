@@ -41,6 +41,11 @@
     "externalBin": [
       "binaries/sovlens-backend"
     ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
     "android": {
       "debugApplicationIdSuffix": ".debug"
     }
