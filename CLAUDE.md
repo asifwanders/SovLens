@@ -182,13 +182,27 @@ Persistent context for future sessions. Update when you discover new traps.
 
 ## 16. Sub-agent strategy that works
 
-- **HARD RULE**: ALWAYS spawn sub-agents for research, cross-file scans, doc lookups, multi-file fixes. Keep main context clean. Don't grep+read directly from main thread when agent can do it
+- **HARD RULE**: ALWAYS spawn sub-agents for ANY of:
+  - Documentation lookups (Tauri, PyInstaller, third-party crates, HF, etc.)
+  - Cross-file scans / grep across >1 file
+  - Multi-file edits where agents can work in parallel
+  - Audits / reviews
+  - Researching error messages or library API misuse
+  - Reading >2 unfamiliar files to understand a bug
+- **User has called this out twice — keep main context clean by default**
+- Do NOT inline read+grep+web research in main thread when a single-shot agent could return a 200-word summary instead of 50KB of raw file content
+- Spawn parallel agents when slices are disjoint; serialize when same file
 - Phase A: 3-5 agents in parallel on disjoint files
 - Phase B: serialize agents that touch same file
 - Phase C: 1 Opus reviewer (different model than implementers)
 - Phase D: 1 Sonnet fixer for review findings
 - Phase E: 1 Opus final sweep
 - Always Task-track via TaskCreate/TaskUpdate to survive /compact
+
+### Anti-patterns I keep falling into
+- Reading 3+ files directly to "verify the bug" instead of asking an agent to do the diagnosis
+- Doing edits directly when a sub-agent could batch-edit + report back
+- Using WebFetch in main thread for docs research — always delegate to an agent
 
 ---
 
