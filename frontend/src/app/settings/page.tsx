@@ -38,6 +38,15 @@ interface ModelsStatusResponse {
 
 const API_BASE = "http://127.0.0.1:14793";
 
+// Mirror of backend/config.py LEVEL_PARAMS — which models each level needs.
+// Used to auto-trigger downloads when the user picks a higher level.
+const LEVEL_REQUIRED_MODELS: Record<string, string[]> = {
+  low: ["clip"],
+  medium: ["clip"],
+  high: ["clip", "whisper", "ocr"],
+  extreme: ["clip", "whisper", "ocr", "yolo"],
+};
+
 export default function SettingsPage() {
   const [config, setConfig] = useState<ConfigResponse | null>(null);
   const [selectedLevel, setSelectedLevel] = useState<string>("");
@@ -50,10 +59,11 @@ export default function SettingsPage() {
   const [isIngesting, setIsIngesting] = useState(false);
   const [reindexInFlight, setReindexInFlight] = useState(false);
 
-  // AI model status
+  // AI model status. `warming` is a Set so multiple models can show
+  // a "Downloading…" state in parallel (e.g. switching to Extreme).
   const [modelStatus, setModelStatus] = useState<ModelsStatusResponse | null>(null);
-  const [warming, setWarming] = useState<string | null>(null);
-  const warmingRef = useRef<string | null>(null);
+  const [warming, setWarming] = useState<Set<string>>(new Set());
+  const warmingRef = useRef<Set<string>>(new Set());
 
   // Updater state
   const [appVersion, setAppVersion] = useState<string>("...");
@@ -85,12 +95,16 @@ export default function SettingsPage() {
       if (!res.ok) return;
       const data = (await res.json()) as ModelsStatusResponse;
       setModelStatus(data);
-      // Stop warming flag once the model is downloaded/loaded
-      if (warmingRef.current) {
-        const key = warmingRef.current as keyof ModelsStatusResponse;
-        if (data[key]?.downloaded) {
-          setWarming(null);
-          warmingRef.current = null;
+      // Drop warming flags for any model that has finished downloading.
+      if (warmingRef.current.size > 0) {
+        const next = new Set(warmingRef.current);
+        for (const key of warmingRef.current) {
+          const k = key as keyof ModelsStatusResponse;
+          if (data[k]?.downloaded) next.delete(key);
+        }
+        if (next.size !== warmingRef.current.size) {
+          warmingRef.current = next;
+          setWarming(next);
         }
       }
     } catch {
@@ -143,17 +157,19 @@ export default function SettingsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Poll /models/status while a warmup is in flight
+  // Always poll /models/status while the page is mounted. Cheap call, no
+  // model I/O. Catches downloads triggered by ingestion / other paths too.
   useEffect(() => {
-    if (!warming) return;
-    const interval = setInterval(() => { void fetchModelStatus(); }, 2000);
+    const interval = setInterval(() => { void fetchModelStatus(); }, 3000);
     return () => clearInterval(interval);
-  }, [warming, fetchModelStatus]);
+  }, [fetchModelStatus]);
 
   const warmup = useCallback(async (key: string) => {
-    if (warming) return;
-    setWarming(key);
-    warmingRef.current = key;
+    if (warmingRef.current.has(key)) return;
+    const next = new Set(warmingRef.current);
+    next.add(key);
+    warmingRef.current = next;
+    setWarming(next);
     try {
       await fetch(`${API_BASE}/models/warmup`, {
         method: "POST",
@@ -163,7 +179,7 @@ export default function SettingsPage() {
     } catch {
       // warmup endpoint may not respond immediately — polling will detect completion
     }
-  }, [warming]);
+  }, []);
 
   // Poll /status while a re-index is in flight
   useEffect(() => {
@@ -197,8 +213,23 @@ export default function SettingsPage() {
       if (!res.ok) throw new Error(`Save failed: ${res.status}`);
       const level = config?.available_levels.find((l: LevelInfo) => l.key === key);
       const label = level?.label ?? key;
-      setToast(`Settings saved. New media will be indexed at ${label} level.`);
-      setTimeout(() => setToast(null), 4000);
+
+      // Auto-trigger background download for any newly required models
+      // that aren't on disk yet. The UI will show "Downloading…" per model
+      // via the polling loop above.
+      const required = LEVEL_REQUIRED_MODELS[key] ?? [];
+      const toDownload = required.filter((m) => {
+        const k = m as keyof ModelsStatusResponse;
+        return !modelStatus?.[k]?.downloaded;
+      });
+      for (const m of toDownload) void warmup(m);
+
+      const extra = toDownload.length > 0
+        ? ` Downloading ${toDownload.length} model${toDownload.length === 1 ? "" : "s"}…`
+        : "";
+      setToast(`Settings saved. New media will be indexed at ${label} level.${extra}`);
+      setTimeout(() => setToast(null), 5000);
+      void fetchModelStatus();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save settings.");
       // Revert
@@ -346,7 +377,7 @@ export default function SettingsPage() {
             {MODELS.map((m) => {
               const status = modelStatus ? modelStatus[m.key as keyof ModelsStatusResponse] : null;
               const isDownloaded = status?.downloaded ?? false;
-              const isWarming = warming === m.key;
+              const isWarming = warming.has(m.key);
               return (
                 <div
                   key={m.key}
@@ -376,7 +407,7 @@ export default function SettingsPage() {
                     ) : (
                       <button
                         onClick={() => warmup(m.key)}
-                        disabled={!!warming}
+                        disabled={warming.has(m.key)}
                         className="text-xs px-2 py-1 rounded border border-accent/30 bg-accent/10 hover:bg-accent/20 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                       >
                         Download

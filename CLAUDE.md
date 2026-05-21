@@ -166,6 +166,8 @@ Persistent context for future sessions. Update when you discover new traps.
 16. **Subprocess spawned from PyInstaller `console=False` GUI app pops `conhost.exe` window on each child** — set `creationflags=0x08000000` (CREATE_NO_WINDOW) in `subprocess.run` on Windows
 17. **Tauri NSIS defaults to `perMachine`** requiring admin → SmartScreen + UAC double-prompt. Set `bundle.windows.nsis.installMode: "currentUser"`
 18. **Tauri NSIS default template kills main exe but NOT sidecar** — upgrade installer fails with "Error opening file for writing: ...sovlens-backend.exe". Add `installerHooks: "./windows/hooks.nsh"` with `NSIS_HOOK_PREINSTALL` + `NSIS_HOOK_PREUNINSTALL` macros running `taskkill /F /IM sovlens-backend.exe /T`
+19. **Tauri 2 plugin commands need explicit capability ACL** — `@tauri-apps/plugin-updater`'s `check()` IPC blocked by default. Add `updater:default` (covers allow-check + allow-download-and-install) to `capabilities/default.json` permissions. Same pattern for every JS plugin call: missing perm = "Command plugin:X|Y not allowed by ACL". Server-side `app.updater()` from a Rust `#[tauri::command]` bypasses ACL — ACL only gates webview→Rust IPC
+20. **Settings UI `warming: string | null` blocks parallel model downloads** — switching to Extreme needs whisper+ocr+yolo concurrently. Use `Set<string>` + `Set<string>` ref; iterate Set to drop keys once `/models/status` reports `downloaded: true`. Always-poll `/models/status` while page mounted (cheap, no model I/O) — gating poll on `warming` misses background downloads kicked off elsewhere
 
 ---
 
