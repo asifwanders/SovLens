@@ -1,5 +1,70 @@
 #[allow(unused_imports)]
 use tauri_plugin_shell::ShellExt;
+use tauri_plugin_updater::UpdaterExt;
+
+#[derive(serde::Serialize)]
+pub struct UpdateInfo {
+    pub version: String,
+    pub body: Option<String>,
+}
+
+#[tauri::command]
+async fn check_for_updates(app: tauri::AppHandle) -> Result<Option<UpdateInfo>, String> {
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    match updater.check().await {
+        Ok(Some(update)) => Ok(Some(UpdateInfo {
+            version: update.version.clone(),
+            body: update.body.clone(),
+        })),
+        Ok(None) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn install_panic_logger() {
+    let log_dir = match dirs::data_local_dir().or_else(dirs::home_dir) {
+        Some(p) => p.join("SovLens").join("logs"),
+        None => return,
+    };
+    let _ = std::fs::create_dir_all(&log_dir);
+
+    let log_path = log_dir.join("panic.log");
+    std::panic::set_hook(Box::new(move |info| {
+        let ts = chrono::Utc::now().to_rfc3339();
+        let payload = format!("[{}] PANIC: {}\n{}\n\n", ts, info, std::backtrace::Backtrace::force_capture());
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+            use std::io::Write;
+            let _ = f.write_all(payload.as_bytes());
+        }
+        eprintln!("{}", payload);
+    }));
+}
+
+#[tauri::command]
+fn open_logs_folder() -> Result<(), String> {
+    let dir = dirs::data_local_dir().or_else(dirs::home_dir)
+        .map(|p| p.join("SovLens").join("logs"))
+        .ok_or("could not resolve logs dir")?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    std::process::Command::new("open").arg(&dir).spawn().map_err(|e| e.to_string())?;
+    #[cfg(target_os = "windows")]
+    std::process::Command::new("explorer.exe").arg(&dir).spawn().map_err(|e| e.to_string())?;
+    #[cfg(target_os = "linux")]
+    std::process::Command::new("xdg-open").arg(&dir).spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn read_recent_logs(max_bytes: usize) -> Result<String, String> {
+    let path = dirs::data_local_dir().or_else(dirs::home_dir)
+        .map(|p| p.join("SovLens").join("logs").join("panic.log"))
+        .ok_or("no logs dir")?;
+    if !path.exists() { return Ok(String::new()); }
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let start = bytes.len().saturating_sub(max_bytes);
+    Ok(String::from_utf8_lossy(&bytes[start..]).into_owned())
+}
 
 use std::path::Path;
 
@@ -128,7 +193,9 @@ fn set_macos_dock_icon() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    install_panic_logger();
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
@@ -179,7 +246,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![reveal_in_explorer, copy_media_to_clipboard])
+        .invoke_handler(tauri::generate_handler![reveal_in_explorer, copy_media_to_clipboard, open_logs_folder, read_recent_logs, check_for_updates])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

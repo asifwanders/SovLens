@@ -1,0 +1,250 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # macOS ARM64 (Apple Silicon — macos-14)
+  # ---------------------------------------------------------------------------
+  build-macos-arm:
+    name: Build macOS ARM64
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-macos-arm-${{ hashFiles('backend/requirements.txt', 'backend/constraints.txt', 'backend/requirements-build.txt') }}
+          restore-keys: pip-macos-arm-
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            frontend/src-tauri/target
+          key: cargo-macos-arm-${{ hashFiles('frontend/src-tauri/Cargo.lock') }}
+          restore-keys: cargo-macos-arm-
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: frontend/node_modules
+          key: npm-macos-arm-${{ hashFiles('frontend/package-lock.json') }}
+          restore-keys: npm-macos-arm-
+
+      - name: Install Python deps + PyInstaller
+        working-directory: backend
+        run: |
+          python -m venv venv
+          source venv/bin/activate
+          pip install --upgrade pip
+          pip install -c constraints.txt -r requirements.txt
+          pip install -r requirements-build.txt
+
+      - name: Build backend sidecar
+        run: bash frontend/src-tauri/binaries/build.sh
+
+      - name: Install Node deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: frontend
+          tagName: ${{ github.ref_name }}
+          releaseName: "SovLens ${{ github.ref_name }}"
+          releaseBody: "See CHANGELOG for details."
+          releaseDraft: false
+          prerelease: false
+
+  # ---------------------------------------------------------------------------
+  # macOS Intel (x86_64 — macos-13)
+  # ---------------------------------------------------------------------------
+  build-macos-intel:
+    name: Build macOS Intel
+    runs-on: macos-13
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-macos-intel-${{ hashFiles('backend/requirements.txt', 'backend/constraints.txt', 'backend/requirements-build.txt') }}
+          restore-keys: pip-macos-intel-
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            frontend/src-tauri/target
+          key: cargo-macos-intel-${{ hashFiles('frontend/src-tauri/Cargo.lock') }}
+          restore-keys: cargo-macos-intel-
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: frontend/node_modules
+          key: npm-macos-intel-${{ hashFiles('frontend/package-lock.json') }}
+          restore-keys: npm-macos-intel-
+
+      - name: Install Python deps + PyInstaller
+        working-directory: backend
+        run: |
+          python -m venv venv
+          source venv/bin/activate
+          pip install --upgrade pip
+          pip install -c constraints.txt -r requirements.txt
+          pip install -r requirements-build.txt
+
+      - name: Build backend sidecar
+        run: bash frontend/src-tauri/binaries/build.sh
+
+      - name: Install Node deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: frontend
+          tagName: ${{ github.ref_name }}
+          releaseName: "SovLens ${{ github.ref_name }}"
+          releaseBody: "See CHANGELOG for details."
+          releaseDraft: false
+          prerelease: false
+
+  # ---------------------------------------------------------------------------
+  # Windows x86_64
+  # ---------------------------------------------------------------------------
+  build-windows:
+    name: Build Windows x86_64
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\pip\Cache
+          key: pip-windows-${{ hashFiles('backend/requirements.txt', 'backend/constraints.txt', 'backend/requirements-build.txt') }}
+          restore-keys: pip-windows-
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\.cargo\registry
+            ~\.cargo\git
+            frontend\src-tauri\target
+          key: cargo-windows-${{ hashFiles('frontend/src-tauri/Cargo.lock') }}
+          restore-keys: cargo-windows-
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: frontend\node_modules
+          key: npm-windows-${{ hashFiles('frontend/package-lock.json') }}
+          restore-keys: npm-windows-
+
+      - name: Create Python venv
+        working-directory: backend
+        shell: pwsh
+        run: python -m venv venv
+
+      # CUDA torch must be installed BEFORE the rest of requirements
+      # so pip doesn't pull the CPU-only wheel transitively.
+      - name: Install CUDA torch (Windows)
+        working-directory: backend
+        shell: pwsh
+        run: |
+          .\venv\Scripts\Activate.ps1
+          pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+      - name: Install remaining Python deps + PyInstaller
+        working-directory: backend
+        shell: pwsh
+        run: |
+          .\venv\Scripts\Activate.ps1
+          pip install --upgrade pip
+          pip install -c constraints.txt -r requirements.txt
+          pip install -r requirements-build.txt
+
+      - name: Build backend sidecar
+        shell: cmd
+        run: frontend\src-tauri\binaries\build.bat
+
+      - name: Install Node deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: frontend
+          tagName: ${{ github.ref_name }}
+          releaseName: "SovLens ${{ github.ref_name }}"
+          releaseBody: "See CHANGELOG for details."
+          releaseDraft: false
+          prerelease: false

@@ -19,6 +19,18 @@ import hls_stream
 import json
 import mimetypes
 import config
+import logging
+from logging.handlers import RotatingFileHandler
+
+_log_dir = os.path.join(platform_utils.get_app_data_dir(), "logs")
+os.makedirs(_log_dir, exist_ok=True)
+_handler = RotatingFileHandler(
+    os.path.join(_log_dir, "backend.log"),
+    maxBytes=5 * 1024 * 1024,
+    backupCount=3,
+)
+_handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s"))
+logging.basicConfig(level=logging.INFO, handlers=[_handler, logging.StreamHandler()])
 
 tasks_in_progress = 0
 _tasks_lock = threading.Lock()
@@ -739,6 +751,182 @@ def add_files(req: AddFilesRequest, background_tasks: BackgroundTasks):
     if accepted:
         background_tasks.add_task(_add_files_wrapper, accepted)
     return {"accepted": len(accepted), "rejected": rejected}
+
+
+# ---------------------------------------------------------------------------
+# Model status + warmup endpoints
+# ---------------------------------------------------------------------------
+
+def _hf_model_downloaded(name: str) -> bool:
+    """Check if a HuggingFace / sentence-transformers model is in the local cache."""
+    from pathlib import Path
+    hf_cache = Path(os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")))
+    st_cache = Path(os.path.expanduser("~/.cache/torch/sentence_transformers"))
+    needle = name.replace("/", "_")
+    for base in (hf_cache, st_cache):
+        if not base.exists():
+            continue
+        for child in base.rglob("*"):
+            if child.is_dir() and needle in child.name:
+                return True
+    return False
+
+
+def _whisper_downloaded() -> bool:
+    """Check if any Whisper model is in the local cache."""
+    from pathlib import Path
+    cache = Path(os.path.expanduser("~/.cache/whisper"))
+    if not cache.exists():
+        return False
+    return any(cache.iterdir())
+
+
+def _yolo_downloaded() -> bool:
+    """Check if yolov8n.pt is on disk (CWD or common locations)."""
+    from pathlib import Path
+    candidates = [
+        Path("yolov8n.pt"),
+        Path(os.path.expanduser("~/.cache/ultralytics/assets/yolov8n.pt")),
+        Path(os.path.expanduser("~/.cache/ultralytics/yolov8n.pt")),
+        Path(platform_utils.get_app_data_dir()) / "yolov8n.pt",
+    ]
+    return any(p.exists() for p in candidates)
+
+
+def _easyocr_downloaded() -> bool:
+    """Check if EasyOCR model files are present."""
+    from pathlib import Path
+    cache = Path(os.path.expanduser("~/.EasyOCR"))
+    if not cache.exists():
+        return False
+    return any(cache.rglob("*.pth")) or any(cache.rglob("*.pt"))
+
+
+def _clip_status() -> dict:
+    cfg_params = config.get_current_level_params()
+    requested = cfg_params.get("model", "clip-ViT-L-14")
+    effective = core.resolve_model_name(requested)
+    return {
+        "name": effective,
+        "loaded": core.get_model_name() == effective,
+        "downloaded": _hf_model_downloaded(effective),
+    }
+
+
+def _whisper_loaded() -> bool:
+    """Return True if a whisper model is currently loaded in memory."""
+    try:
+        return getattr(audio_ingest, "_whisper_model", None) is not None
+    except Exception:
+        return False
+
+
+def _whisper_status() -> dict:
+    return {
+        "name": "whisper",
+        "available": audio_ingest.WHISPER_AVAILABLE,
+        "loaded": audio_ingest.WHISPER_AVAILABLE and _whisper_loaded(),
+        "downloaded": _whisper_downloaded(),
+    }
+
+
+def _yolo_loaded() -> bool:
+    try:
+        return getattr(yolo_detect, "_model", None) is not None
+    except Exception:
+        return False
+
+
+def _yolo_status() -> dict:
+    return {
+        "name": "yolov8n",
+        "available": yolo_detect.YOLO_AVAILABLE,
+        "loaded": yolo_detect.YOLO_AVAILABLE and _yolo_loaded(),
+        "downloaded": _yolo_downloaded(),
+    }
+
+
+def _ocr_loaded() -> bool:
+    try:
+        return getattr(ocr_detect, "_reader", None) is not None
+    except Exception:
+        return False
+
+
+def _ocr_status() -> dict:
+    return {
+        "name": "easyocr",
+        "available": ocr_detect.OCR_AVAILABLE,
+        "loaded": ocr_detect.OCR_AVAILABLE and _ocr_loaded(),
+        "downloaded": _easyocr_downloaded(),
+    }
+
+
+@app.get("/models/status")
+def models_status():
+    """Return download/load state for each AI model. Fast — no model I/O."""
+    return {
+        "clip": _clip_status(),
+        "whisper": _whisper_status(),
+        "yolo": _yolo_status(),
+        "ocr": _ocr_status(),
+    }
+
+
+class WarmupRequest(BaseModel):
+    model: str  # "clip" | "whisper" | "yolo" | "ocr"
+
+
+@app.post("/models/warmup")
+def models_warmup(req: WarmupRequest, background_tasks: BackgroundTasks):
+    """Force-load the named model in the background. Returns 202 immediately.
+
+    Frontend should poll /models/status until loaded=true.
+    BackgroundTask avoids blocking the request thread for cold-load (~30s).
+    """
+    valid = {"clip", "whisper", "yolo", "ocr"}
+    if req.model not in valid:
+        raise HTTPException(status_code=400, detail=f"model must be one of {valid}")
+
+    def _warmup_clip():
+        try:
+            import numpy as _np
+            from PIL import Image as _Img
+            dummy = _Img.fromarray(_np.zeros((1, 1, 3), dtype=_np.uint8))
+            core.encode_image(dummy)
+            print("[warmup] CLIP loaded")
+        except Exception as exc:
+            print(f"[warmup] CLIP error: {exc}")
+
+    def _warmup_whisper():
+        try:
+            audio_ingest._get_whisper_model()
+            print("[warmup] Whisper loaded")
+        except Exception as exc:
+            print(f"[warmup] Whisper error: {exc}")
+
+    def _warmup_yolo():
+        try:
+            yolo_detect._get_model()
+            print("[warmup] YOLO loaded")
+        except Exception as exc:
+            print(f"[warmup] YOLO error: {exc}")
+
+    def _warmup_ocr():
+        try:
+            ocr_detect._get_reader()
+            print("[warmup] OCR loaded")
+        except Exception as exc:
+            print(f"[warmup] OCR error: {exc}")
+
+    runners = {
+        "clip": _warmup_clip,
+        "whisper": _warmup_whisper,
+        "yolo": _warmup_yolo,
+        "ocr": _warmup_ocr,
+    }
+    background_tasks.add_task(runners[req.model])
+    return {"message": f"Warming up {req.model}", "model": req.model}
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "sovlens",
+  "productName": "SovLens",
   "version": "0.1.0",
-  "identifier": "com.tauri.dev",
+  "identifier": "com.sovstac.sovlens",
   "build": {
     "frontendDist": "../out",
     "devUrl": "http://localhost:3000",
@@ -27,6 +27,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "SovStac",
+    "copyright": "Copyright © SovStac 2026",
+    "homepage": "https://sovstac.com",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -39,6 +42,15 @@
     ],
     "android": {
       "debugApplicationIdSuffix": ".debug"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "pubkey": "RWTePG/I/YHINrWhy6RwxVNNXDr3/qZ+B+1j4pgj+jAE/ae78XPs+7fO",
+      "endpoints": [
+        "https://github.com/asifwanders/SovLens/releases/latest/download/latest.json"
+      ]
     }
   }
 }

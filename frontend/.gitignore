@@ -39,3 +39,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Tauri updater signing keys — NEVER commit these
+*.tauri.key
+tauri-updater-private.key
+sovlens-updater.key

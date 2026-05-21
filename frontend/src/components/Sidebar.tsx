@@ -114,7 +114,7 @@ export default function Sidebar() {
         </Link>
 
         <a
-          href="https://github.com/sovstac/sovlens/issues/new"
+          href="https://github.com/asifwanders/SovLens/issues/new"
           target="_blank"
           rel="noreferrer"
           title={collapsed ? "Request Feature" : undefined}

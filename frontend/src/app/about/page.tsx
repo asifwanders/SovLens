@@ -119,7 +119,7 @@ export default function AboutPage() {
             features at our repo.
           </p>
           <a
-            href="https://github.com/"
+            href="https://github.com/asifwanders/SovLens"
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-opacity hover:opacity-80"

@@ -1,7 +1,40 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-shell";
+import { getVersion } from "@tauri-apps/api/app";
+import { check } from "@tauri-apps/plugin-updater";
 import { ConfigResponse, LevelInfo } from "@/lib/types";
+
+// ---------------------------------------------------------------------------
+// AI model list
+// ---------------------------------------------------------------------------
+interface ModelMeta {
+  key: string;
+  label: string;
+  size: string;
+  required: boolean;
+}
+
+const MODELS: ModelMeta[] = [
+  { key: "clip",    label: "Visual search (CLIP)",          size: "~890 MB", required: true  },
+  { key: "whisper", label: "Voice transcription (Whisper)", size: "~150 MB", required: false },
+  { key: "ocr",     label: "Text in images (EasyOCR)",      size: "~150 MB", required: false },
+  { key: "yolo",    label: "Object detection (YOLOv8)",     size: "~6 MB",   required: false },
+];
+
+interface ModelStatus {
+  downloaded: boolean;
+  loaded: boolean;
+  available?: boolean;
+}
+interface ModelsStatusResponse {
+  clip:    ModelStatus;
+  whisper: ModelStatus;
+  yolo:    ModelStatus;
+  ocr:     ModelStatus;
+}
 
 const API_BASE = "http://localhost:14793";
 
@@ -16,6 +49,19 @@ export default function SettingsPage() {
   const [reindexMessage, setReindexMessage] = useState<string | null>(null);
   const [isIngesting, setIsIngesting] = useState(false);
   const [reindexInFlight, setReindexInFlight] = useState(false);
+
+  // AI model status
+  const [modelStatus, setModelStatus] = useState<ModelsStatusResponse | null>(null);
+  const [warming, setWarming] = useState<string | null>(null);
+  const warmingRef = useRef<string | null>(null);
+
+  // Updater state
+  const [appVersion, setAppVersion] = useState<string>("...");
+  const [updateAvailable, setUpdateAvailable] = useState<{ version: string; body?: string | null } | null>(null);
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [updateInstalling, setUpdateInstalling] = useState(false);
+  const [updateMessage, setUpdateMessage] = useState<string | null>(null);
+  const [lastChecked, setLastChecked] = useState<string | null>(null);
 
   const fetchConfig = useCallback(async () => {
     setIsLoading(true);
@@ -33,10 +79,91 @@ export default function SettingsPage() {
     }
   }, []);
 
+  const fetchModelStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/models/status`);
+      if (!res.ok) return;
+      const data = (await res.json()) as ModelsStatusResponse;
+      setModelStatus(data);
+      // Stop warming flag once the model is downloaded/loaded
+      if (warmingRef.current) {
+        const key = warmingRef.current as keyof ModelsStatusResponse;
+        if (data[key]?.downloaded) {
+          setWarming(null);
+          warmingRef.current = null;
+        }
+      }
+    } catch {
+      // backend not ready yet — ignore
+    }
+  }, []);
+
+  const checkForUpdates = useCallback(async (silent = false) => {
+    setUpdateChecking(true);
+    if (!silent) setUpdateMessage(null);
+    try {
+      const update = await check();
+      setLastChecked(new Date().toLocaleTimeString());
+      if (update?.available) {
+        setUpdateAvailable({ version: update.version, body: update.body });
+        if (silent) setToast(`v${update.version} is available. See Updates section.`);
+      } else {
+        setUpdateAvailable(null);
+        if (!silent) setUpdateMessage("You are on the latest version.");
+      }
+    } catch (e) {
+      if (!silent) setUpdateMessage(`Update check failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setUpdateChecking(false);
+    }
+  }, []);
+
+  const handleInstallUpdate = async () => {
+    if (!updateAvailable) return;
+    setUpdateInstalling(true);
+    setUpdateMessage("Downloading and installing update…");
+    try {
+      const update = await check();
+      if (update?.available) {
+        await update.downloadAndInstall();
+        // Tauri will relaunch the app automatically after install
+      }
+    } catch (e) {
+      setUpdateMessage(`Install failed: ${e instanceof Error ? e.message : String(e)}`);
+      setUpdateInstalling(false);
+    }
+  };
+
   useEffect(() => {
     queueMicrotask(() => { void fetchConfig(); });
+    queueMicrotask(() => { void fetchModelStatus(); });
+    getVersion().then(setAppVersion).catch(() => setAppVersion("unknown"));
+    // Auto-check silently on mount
+    void checkForUpdates(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Poll /models/status while a warmup is in flight
+  useEffect(() => {
+    if (!warming) return;
+    const interval = setInterval(() => { void fetchModelStatus(); }, 2000);
+    return () => clearInterval(interval);
+  }, [warming, fetchModelStatus]);
+
+  const warmup = useCallback(async (key: string) => {
+    if (warming) return;
+    setWarming(key);
+    warmingRef.current = key;
+    try {
+      await fetch(`${API_BASE}/models/warmup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: key }),
+      });
+    } catch {
+      // warmup endpoint may not respond immediately — polling will detect completion
+    }
+  }, [warming]);
 
   // Poll /status while a re-index is in flight
   useEffect(() => {
@@ -78,6 +205,26 @@ export default function SettingsPage() {
       if (config) setSelectedLevel(config.level);
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  const handleOpenLogs = async () => {
+    try {
+      await invoke("open_logs_folder");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not open logs folder.");
+    }
+  };
+
+  const handleReportBug = async () => {
+    try {
+      const logs = await invoke<string>("read_recent_logs", { maxBytes: 4000 });
+      const version = await getVersion().catch(() => "unknown");
+      const body = `## Description\n(Describe what you were doing)\n\n## Expected\n...\n\n## Actual\n...\n\n## Environment\n- OS: macOS / Windows\n- SovLens version: ${version}\n- Hardware: (e.g., M2 Pro, RTX 4060)\n\n## Recent logs\n\`\`\`\n${logs || "(no logs found)"}\n\`\`\``;
+      const url = `https://github.com/asifwanders/SovLens/issues/new?title=Bug%20report&body=${encodeURIComponent(body)}`;
+      await open(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not open bug report.");
     }
   };
 
@@ -188,6 +335,129 @@ export default function SettingsPage() {
             </div>
           ) : null}
         </section>
+
+        {/* AI models section */}
+        <div className="mt-8 pt-6 border-t border-panel-border">
+          <h2 className="text-lg font-medium mb-3">AI models</h2>
+          <p className="text-sm text-foreground/70 mb-4">
+            Models download automatically when first needed. You can pre-download them now.
+          </p>
+          <div className="space-y-2">
+            {MODELS.map((m) => {
+              const status = modelStatus ? modelStatus[m.key as keyof ModelsStatusResponse] : null;
+              const isDownloaded = status?.downloaded ?? false;
+              const isWarming = warming === m.key;
+              return (
+                <div
+                  key={m.key}
+                  className="flex items-center justify-between rounded-lg border border-panel-border px-4 py-3"
+                >
+                  <div>
+                    <div className="font-medium text-sm">{m.label}</div>
+                    <div className="text-xs text-foreground/50">
+                      {m.size} &mdash; {m.required ? "Required" : "Optional"}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {isDownloaded ? (
+                      <span className="text-xs text-accent flex items-center gap-1">
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                        </svg>
+                        Downloaded
+                      </span>
+                    ) : isWarming ? (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-foreground/60">Downloading&hellip;</span>
+                        <div className="w-24 h-1 bg-foreground/10 rounded overflow-hidden">
+                          <div className="h-full bg-accent animate-pulse w-full" />
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => warmup(m.key)}
+                        disabled={!!warming}
+                        className="text-xs px-2 py-1 rounded border border-accent/30 bg-accent/10 hover:bg-accent/20 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                      >
+                        Download
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Updates section */}
+        <div className="mt-8 pt-6 border-t border-panel-border">
+          <h2 className="text-lg font-medium mb-1">Updates</h2>
+          <p className="text-sm text-foreground/70 mb-3">
+            Current version:{" "}
+            <span className="font-mono text-foreground/90">v{appVersion}</span>
+            {lastChecked && (
+              <span className="ml-3 text-foreground/40">Last checked: {lastChecked}</span>
+            )}
+          </p>
+
+          {updateAvailable ? (
+            <div className="mb-3 px-4 py-3 rounded-xl bg-accent/10 border border-accent/30 text-sm">
+              <p className="font-medium text-accent mb-1">
+                v{updateAvailable.version} is available — restart to install.
+              </p>
+              {updateAvailable.body && (
+                <p className="text-foreground/70 text-xs mt-1 whitespace-pre-wrap line-clamp-4">
+                  {updateAvailable.body}
+                </p>
+              )}
+              {updateMessage && (
+                <p className="text-foreground/60 text-xs mt-2">{updateMessage}</p>
+              )}
+              <button
+                onClick={handleInstallUpdate}
+                disabled={updateInstalling}
+                className="mt-3 px-4 py-2 rounded-lg bg-accent text-white hover:bg-accent/90 transition-colors text-sm disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {updateInstalling ? "Installing…" : "Download & Install"}
+              </button>
+            </div>
+          ) : (
+            updateMessage && (
+              <p className="text-sm text-foreground/60 mb-3">{updateMessage}</p>
+            )
+          )}
+
+          <button
+            onClick={() => checkForUpdates(false)}
+            disabled={updateChecking || updateInstalling}
+            className="px-4 py-2 rounded-lg border transition-colors text-sm bg-accent/10 hover:bg-accent/20 text-accent border-accent/30 disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            {updateChecking ? "Checking…" : "Check for Updates"}
+          </button>
+        </div>
+
+        {/* Help & diagnostics section */}
+        <div className="mt-8 pt-6 border-t border-panel-border">
+          <h2 className="text-lg font-medium mb-2">Help &amp; diagnostics</h2>
+          <p className="text-sm text-foreground/70 mb-3">
+            Crash logs are saved locally to your app data folder. Nothing is sent automatically.
+            To report a bug, click below — we&apos;ll open a pre-filled GitHub issue you can review and submit.
+          </p>
+          <div className="flex gap-2">
+            <button
+              onClick={handleOpenLogs}
+              className="px-4 py-2 rounded-lg border transition-colors text-sm bg-accent/10 hover:bg-accent/20 text-accent border-accent/30"
+            >
+              Open Logs Folder
+            </button>
+            <button
+              onClick={handleReportBug}
+              className="px-4 py-2 rounded-lg border transition-colors text-sm bg-accent/10 hover:bg-accent/20 text-accent border-accent/30"
+            >
+              Report Bug
+            </button>
+          </div>
+        </div>
 
         {/* Re-index section */}
         {!isLoading && (
