@@ -159,6 +159,7 @@ Persistent context for future sessions. Update when you discover new traps.
 9. **Dropping `_rx` from `sidecar.spawn()`** — discards stdout/stderr forever. ALWAYS pipe to `backend.log` via `tauri::async_runtime::spawn` reading `CommandEvent::Stdout/Stderr/Error/Terminated`
 10. **`localhost` on Windows resolves IPv6 `::1` first** — uvicorn binds IPv4 only → 1-2s delay or refused. Use `127.0.0.1` in all frontend fetch URLs
 11. **Tauri file picker `filters` with too many extensions in one group** — Windows `IFileDialog` may reject. Split into multiple filter groups + add `All Files: *` fallback
+12. **`app.path().resolve("sovlens-backend", Resource)` returns bare name without `.exe` on Win** — bundled file is `sovlens-backend.exe` so metadata() fails → 4KB guard skips spawn. Never pre-flight by literal name; let `app.shell().sidecar(name)` do OS-aware resolution and log any error
 
 ---
 

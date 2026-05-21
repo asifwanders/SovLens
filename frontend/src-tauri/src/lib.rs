@@ -253,76 +253,83 @@ pub fn run() {
                     );
                 }
 
-                // Guard against the sidecar binary being absent or an empty
-                // placeholder (common when PyInstaller step was skipped).
-                let bin_path = app
-                    .path()
-                    .resolve("sovlens-backend", tauri::path::BaseDirectory::Resource);
-                let (should_spawn, resolved_path, size) = match bin_path {
-                    Ok(ref p) => {
-                        let sz = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-                        (sz > 4096, p.display().to_string(), sz)
-                    }
-                    Err(ref e) => (false, format!("ERR: {}", e), 0),
-                };
-
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true).append(true).open(&backend_log)
-                {
-                    let _ = writeln!(
-                        f,
-                        "[{}] BOOT sidecar resolved={} size={} spawn={}",
-                        chrono::Utc::now().to_rfc3339(),
-                        resolved_path,
-                        size,
-                        should_spawn
-                    );
-                }
-
-                if should_spawn {
-                    let sidecar_command = app
-                        .shell()
-                        .sidecar("sovlens-backend")
-                        .expect("failed to create sidecar")
-                        .args(["--port", "14793"]);
-                    let (mut rx, _child) = sidecar_command
-                        .spawn()
-                        .expect("failed to spawn sidecar");
-
-                    // Forward sidecar stdout/stderr to backend.log forever.
-                    // Without this, Python crashes are invisible.
-                    let log_path = backend_log.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let mut f = std::fs::OpenOptions::new()
-                            .create(true).append(true).open(&log_path).ok();
-                        while let Some(event) = rx.recv().await {
-                            if let Some(ref mut file) = f {
-                                let ts = chrono::Utc::now().to_rfc3339();
-                                let _ = match event {
-                                    CommandEvent::Stdout(b) => writeln!(
-                                        file, "[{}] OUT {}", ts,
-                                        String::from_utf8_lossy(&b).trim_end()
-                                    ),
-                                    CommandEvent::Stderr(b) => writeln!(
-                                        file, "[{}] ERR {}", ts,
-                                        String::from_utf8_lossy(&b).trim_end()
-                                    ),
-                                    CommandEvent::Error(e) => writeln!(
-                                        file, "[{}] ERR spawn-error: {}", ts, e
-                                    ),
-                                    CommandEvent::Terminated(p) => writeln!(
-                                        file, "[{}] ERR sidecar terminated code={:?} signal={:?}",
-                                        ts, p.code, p.signal
-                                    ),
-                                    _ => Ok(()),
-                                };
+                // Skip the bare-name metadata pre-flight. On Windows the
+                // bundled binary is `sovlens-backend.exe` (Tauri strips the
+                // target-triple and adds the OS extension when packaging),
+                // so checking for a literal `sovlens-backend` file always
+                // fails on Win. Let `shell().sidecar()` do the OS-aware
+                // lookup and surface any failure as a real error in
+                // backend.log.
+                let log_for_async = backend_log.clone();
+                match app.shell().sidecar("sovlens-backend") {
+                    Ok(cmd) => {
+                        let cmd = cmd.args(["--port", "14793"]);
+                        match cmd.spawn() {
+                            Ok((mut rx, _child)) => {
+                                if let Ok(mut f) = std::fs::OpenOptions::new()
+                                    .create(true).append(true).open(&backend_log)
+                                {
+                                    let _ = writeln!(
+                                        f,
+                                        "[{}] BOOT sidecar spawned",
+                                        chrono::Utc::now().to_rfc3339()
+                                    );
+                                }
+                                // Forward sidecar stdout/stderr to backend.log.
+                                tauri::async_runtime::spawn(async move {
+                                    let mut f = std::fs::OpenOptions::new()
+                                        .create(true).append(true).open(&log_for_async).ok();
+                                    while let Some(event) = rx.recv().await {
+                                        if let Some(ref mut file) = f {
+                                            let ts = chrono::Utc::now().to_rfc3339();
+                                            let _ = match event {
+                                                CommandEvent::Stdout(b) => writeln!(
+                                                    file, "[{}] OUT {}", ts,
+                                                    String::from_utf8_lossy(&b).trim_end()
+                                                ),
+                                                CommandEvent::Stderr(b) => writeln!(
+                                                    file, "[{}] ERR {}", ts,
+                                                    String::from_utf8_lossy(&b).trim_end()
+                                                ),
+                                                CommandEvent::Error(e) => writeln!(
+                                                    file, "[{}] ERR spawn-error: {}", ts, e
+                                                ),
+                                                CommandEvent::Terminated(p) => writeln!(
+                                                    file, "[{}] ERR sidecar terminated code={:?} signal={:?}",
+                                                    ts, p.code, p.signal
+                                                ),
+                                                _ => Ok(()),
+                                            };
+                                        }
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                if let Ok(mut f) = std::fs::OpenOptions::new()
+                                    .create(true).append(true).open(&backend_log)
+                                {
+                                    let _ = writeln!(
+                                        f,
+                                        "[{}] ERR sidecar spawn failed: {}",
+                                        chrono::Utc::now().to_rfc3339(),
+                                        e
+                                    );
+                                }
                             }
                         }
-                    });
-                } else {
-                    eprintln!(
-                        "WARN: sovlens-backend sidecar binary missing or too small, skipping spawn"
-                    );
+                    }
+                    Err(e) => {
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true).append(true).open(&backend_log)
+                        {
+                            let _ = writeln!(
+                                f,
+                                "[{}] ERR sidecar create failed: {}",
+                                chrono::Utc::now().to_rfc3339(),
+                                e
+                            );
+                        }
+                    }
                 }
             }
 
