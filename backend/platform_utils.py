@@ -82,7 +82,18 @@ def normalize_path(p: str) -> str:
     On macOS/Linux normcase is identity (case preserved).
     On Windows it lower-cases and converts forward-slashes to backslashes.
     Use this for all path values stored in LanceDB and for comparison keys.
+
+    On Windows we also strip the ``\\\\?\\`` extended-length / UNC prefix so
+    the same physical file always normalises to the same row. Without this
+    one caller using GetFinalPathNameByHandle and another using a relative
+    path land as two distinct entries in LanceDB.
     """
+    if IS_WINDOWS and isinstance(p, str):
+        if p.startswith("\\\\?\\UNC\\"):
+            # \\?\UNC\server\share\... -> \\server\share\...
+            p = "\\\\" + p[len("\\\\?\\UNC\\"):]
+        elif p.startswith("\\\\?\\"):
+            p = p[len("\\\\?\\"):]
     return os.path.normcase(os.path.abspath(p))
 
 

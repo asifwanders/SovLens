@@ -5,6 +5,10 @@ on:
     tags:
       - "v*.*.*"
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
@@ -46,7 +50,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             frontend/src-tauri/target
-          key: cargo-macos-arm-${{ hashFiles('frontend/src-tauri/Cargo.lock') }}
+          key: cargo-macos-arm-${{ hashFiles('frontend/src-tauri/Cargo.lock', 'frontend/src-tauri/Cargo.toml', 'frontend/src-tauri/tauri.conf.json') }}
           restore-keys: cargo-macos-arm-
 
       - name: Cache npm
@@ -62,11 +66,35 @@ jobs:
           python -m venv venv
           source venv/bin/activate
           pip install --upgrade pip
-          pip install -c constraints.txt -r requirements.txt
-          pip install -r requirements-build.txt
+          pip install --retries 5 --timeout 60 -c constraints.txt -r requirements.txt
+          pip install --retries 5 --timeout 60 -c constraints.txt -r requirements-build.txt
+
+      - name: Verify torch
+        working-directory: backend
+        run: |
+          source venv/bin/activate
+          python -c "import torch; print('torch=', torch.__version__, 'mps=', torch.backends.mps.is_available())"
 
       - name: Build backend sidecar
         run: bash frontend/src-tauri/binaries/build.sh
+
+      - name: Strip quarantine + size verify (macOS)
+        run: |
+          set -euo pipefail
+          BIN="$(ls frontend/src-tauri/binaries/sovlens-backend-*-apple-darwin* 2>/dev/null | head -1)"
+          if [ -z "$BIN" ]; then echo "::error::No sidecar binary found" && exit 1; fi
+          xattr -dr com.apple.quarantine "$BIN" || true
+          SIZE=$(stat -f%z "$BIN")
+          echo "sidecar size: $SIZE bytes"
+          if [ "$SIZE" -lt 10000000 ]; then echo "::error::sidecar binary <10MB" && exit 1; fi
+
+      - name: Upload PyInstaller warnings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyinstaller-warn-macos-arm
+          path: backend/build/sovlens-backend/warn-*.txt
+          if-no-files-found: ignore
 
       - name: Install Node deps
         working-directory: frontend
@@ -137,7 +165,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             frontend/src-tauri/target
-          key: cargo-macos-intel-${{ hashFiles('frontend/src-tauri/Cargo.lock') }}
+          key: cargo-macos-intel-${{ hashFiles('frontend/src-tauri/Cargo.lock', 'frontend/src-tauri/Cargo.toml', 'frontend/src-tauri/tauri.conf.json') }}
           restore-keys: cargo-macos-intel-
 
       - name: Cache npm
@@ -153,11 +181,35 @@ jobs:
           python -m venv venv
           source venv/bin/activate
           pip install --upgrade pip
-          pip install -c constraints.txt -r requirements.txt
-          pip install -r requirements-build.txt
+          pip install --retries 5 --timeout 60 -c constraints.txt -r requirements.txt
+          pip install --retries 5 --timeout 60 -c constraints.txt -r requirements-build.txt
+
+      - name: Verify torch
+        working-directory: backend
+        run: |
+          source venv/bin/activate
+          python -c "import torch; print('torch=', torch.__version__, 'mps=', torch.backends.mps.is_available())"
 
       - name: Build backend sidecar
         run: bash frontend/src-tauri/binaries/build.sh
+
+      - name: Strip quarantine + size verify (macOS)
+        run: |
+          set -euo pipefail
+          BIN="$(ls frontend/src-tauri/binaries/sovlens-backend-*-apple-darwin* 2>/dev/null | head -1)"
+          if [ -z "$BIN" ]; then echo "::error::No sidecar binary found" && exit 1; fi
+          xattr -dr com.apple.quarantine "$BIN" || true
+          SIZE=$(stat -f%z "$BIN")
+          echo "sidecar size: $SIZE bytes"
+          if [ "$SIZE" -lt 10000000 ]; then echo "::error::sidecar binary <10MB" && exit 1; fi
+
+      - name: Upload PyInstaller warnings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyinstaller-warn-macos-intel
+          path: backend/build/sovlens-backend/warn-*.txt
+          if-no-files-found: ignore
 
       - name: Install Node deps
         working-directory: frontend
@@ -248,7 +300,7 @@ jobs:
             ~\.cargo\registry
             ~\.cargo\git
             frontend\src-tauri\target
-          key: cargo-windows-${{ hashFiles('frontend/src-tauri/Cargo.lock') }}
+          key: cargo-windows-${{ hashFiles('frontend/src-tauri/Cargo.lock', 'frontend/src-tauri/Cargo.toml', 'frontend/src-tauri/tauri.conf.json') }}
           restore-keys: cargo-windows-
 
       - name: Cache npm
@@ -270,7 +322,7 @@ jobs:
         shell: pwsh
         run: |
           .\venv\Scripts\Activate.ps1
-          pip install torch --index-url https://download.pytorch.org/whl/cu121
+          pip install --retries 5 --timeout 60 torch --index-url https://download.pytorch.org/whl/cu121
 
       - name: Install remaining Python deps + PyInstaller
         working-directory: backend
@@ -278,8 +330,8 @@ jobs:
         run: |
           .\venv\Scripts\Activate.ps1
           pip install --upgrade pip
-          pip install -c constraints.txt -r requirements.txt
-          pip install -r requirements-build.txt
+          pip install --retries 5 --timeout 60 -c constraints.txt -r requirements.txt
+          pip install --retries 5 --timeout 60 -c constraints.txt -r requirements-build.txt
 
       # Re-pin the cu121 torch wheel AFTER the main requirements install.
       # pip's resolver will happily downgrade torch to the PyPI CPU wheel
@@ -293,12 +345,30 @@ jobs:
         shell: pwsh
         run: |
           .\venv\Scripts\Activate.ps1
-          pip install --force-reinstall --no-deps torch --index-url https://download.pytorch.org/whl/cu121
+          pip install --retries 5 --timeout 60 --force-reinstall --no-deps torch --index-url https://download.pytorch.org/whl/cu121
           python -c "import torch,sys; assert torch.version.cuda, f'CPU torch wheel leaked into build: {torch.__version__}'; print('torch=', torch.__version__, 'cuda=', torch.version.cuda, 'is_available=', torch.cuda.is_available())"
+
+      - name: Free disk space
+        shell: pwsh
+        run: |
+          Get-PSDrive C | Format-Table -AutoSize
+          # Drop unused tool versions
+          if (Test-Path "C:\hostedtoolcache\Python") {
+            Get-ChildItem "C:\hostedtoolcache\Python" -Directory | Where-Object { $_.Name -notlike "3.11*" } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          Get-PSDrive C | Format-Table -AutoSize
 
       - name: Build backend sidecar
         shell: cmd
         run: frontend\src-tauri\binaries\build.bat
+
+      - name: Upload PyInstaller warnings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyinstaller-warn-windows
+          path: backend/build/sovlens-backend/warn-*.txt
+          if-no-files-found: ignore
 
       - name: Install Node deps
         working-directory: frontend

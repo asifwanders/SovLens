@@ -8,16 +8,36 @@
 ; nsExec::Exec (not ExecWait) so a missing process / non-zero exit doesn't
 ; abort the installer. taskkill returns 128 when no match — swallowed.
 
-!macro NSIS_HOOK_PREINSTALL
+; Poll-wait helper: re-check tasklist up to 10× × 500ms after taskkill so
+; the previous install's sidecar fully releases its .exe write lock before
+; NSIS tries to overwrite it. Plain Sleep 500 leaves a race window where
+; the process is "Terminating" but still holds the file.
+!macro SOVLENS_KILL_SIDECAR_AND_WAIT
   DetailPrint "Stopping SovLens backend sidecar..."
   nsExec::Exec 'taskkill /F /IM sovlens-backend.exe /T'
-  Sleep 500
+  StrCpy $0 0
+  ${Do}
+    Sleep 500
+    nsExec::ExecToStack 'tasklist /FI "IMAGENAME eq sovlens-backend.exe" /NH'
+    Pop $1 ; exit code
+    Pop $2 ; stdout
+    ${If} $2 !S~ "sovlens-backend.exe"
+      ${Break}
+    ${EndIf}
+    IntOp $0 $0 + 1
+    ${If} $0 >= 10
+      DetailPrint "Sidecar still running after 5s — proceeding anyway"
+      ${Break}
+    ${EndIf}
+  ${Loop}
+!macroend
+
+!macro NSIS_HOOK_PREINSTALL
+  !insertmacro SOVLENS_KILL_SIDECAR_AND_WAIT
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
-  DetailPrint "Stopping SovLens backend sidecar..."
-  nsExec::Exec 'taskkill /F /IM sovlens-backend.exe /T'
-  Sleep 500
+  !insertmacro SOVLENS_KILL_SIDECAR_AND_WAIT
 !macroend
 
 ; After uninstall, optionally wipe the app data dir (LanceDB index, logs,

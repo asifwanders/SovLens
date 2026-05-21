@@ -5,3 +5,6 @@
 numpy<2
 # opencv-python-headless >=4.11 declares numpy>=2 hard dependency; force older series.
 opencv-python-headless<4.11
+# setuptools >=81 removes pkg_resources which torch / transformers / ultralytics
+# still import at module load. Pin <81 to future-proof against py 3.12 default runners.
+setuptools<81

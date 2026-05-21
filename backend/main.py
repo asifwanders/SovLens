@@ -1111,9 +1111,27 @@ def admin_wipe_data():
 
     data_dir = platform_utils.get_app_data_dir()
 
+    def _on_rm_error(func, path, _exc_info):
+        """rmtree onerror: chmod writable + retry once.
+
+        On Windows a stale mmap handle on a LanceDB segment leaves the file
+        read-only-locked; the first unlink raises PermissionError. Flipping
+        write bit + retrying clears the typical case.
+        """
+        import stat as _stat
+        try:
+            os.chmod(path, _stat.S_IWRITE | _stat.S_IREAD)
+        except Exception:
+            pass
+        try:
+            func(path)
+        except Exception:
+            pass
+
     def _wipe_and_exit():
         # Tiny delay so the HTTP response actually flushes to the client.
         import time as _time
+        import gc as _gc
         _time.sleep(0.5)
         try:
             # Best-effort close of the LanceDB connection so Windows file
@@ -1122,8 +1140,30 @@ def admin_wipe_data():
                 core.db = None  # type: ignore[assignment]
             except Exception:
                 pass
+            # Force the LanceDB python object + its mmap'd Arrow segments to
+            # be collected before we try to delete the underlying files.
+            try:
+                _gc.collect()
+            except Exception:
+                pass
             if os.path.isdir(data_dir):
-                shutil.rmtree(data_dir, ignore_errors=True)
+                # Retry loop — Win mmap handle release is async, so the first
+                # rmtree may still raise. Up to 5× × 500ms.
+                for _attempt in range(5):
+                    try:
+                        shutil.rmtree(data_dir, onerror=_on_rm_error)
+                        if not os.path.isdir(data_dir):
+                            break
+                    except Exception:
+                        pass
+                    _time.sleep(0.5)
+                    try:
+                        _gc.collect()
+                    except Exception:
+                        pass
+                # Final best-effort sweep so we never block exit.
+                if os.path.isdir(data_dir):
+                    shutil.rmtree(data_dir, ignore_errors=True)
         finally:
             os._exit(0)
 

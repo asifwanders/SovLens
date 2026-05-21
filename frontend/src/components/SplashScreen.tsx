@@ -7,7 +7,11 @@ import { createPortal } from "react-dom";
 const API = "http://127.0.0.1:14793";
 const POLL_MS = 1500;
 const MIN_VISIBLE_MS = 800; // never flash too fast
-const BACKEND_GRACE_MS = 30_000; // give sidecar this long to come up
+// Cold-extract window for the bundled PyInstaller onefile blob (torch + CUDA,
+// ~1 GB) on first launch. On AV-scanned Windows this can take 60–120 s as
+// Defender scans every extracted DLL. 30 s was too short and surfaced
+// "Backend not responding" before the sidecar had even finished extracting.
+const BACKEND_GRACE_MS = 180_000;
 
 type ClipStatus = {
   name: string;

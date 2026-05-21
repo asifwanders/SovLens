@@ -35,4 +35,9 @@ fi
 
 cp "${SRC}" "${DST}"
 chmod +x "${DST}"
-echo "==> Wrote: ${DST}"
+size=$(stat -f%z "${DST}" 2>/dev/null || stat -c%s "${DST}")
+echo "==> Wrote: ${DST} (${size} bytes)"
+if [ "${size}" -lt 10000000 ]; then
+    echo "ERROR: sidecar binary suspiciously small (<10 MB)" >&2
+    exit 1
+fi

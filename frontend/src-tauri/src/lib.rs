@@ -4,6 +4,19 @@ use tauri_plugin_shell::ShellExt;
 use tauri_plugin_updater::UpdaterExt;
 #[allow(unused_imports)]
 use tauri::Manager;
+#[allow(unused_imports)]
+use tauri::RunEvent;
+#[allow(unused_imports)]
+use std::sync::{Arc, Mutex};
+#[allow(unused_imports)]
+use tauri_plugin_shell::process::CommandChild;
+
+/// Shared handle to the spawned PyInstaller backend sidecar so we can kill it
+/// on app exit. Without this the sidecar lives on after cmd+Q (mac) / window
+/// close (win), holds port 14793, and the next launch hangs forever waiting
+/// for the port to free.
+#[derive(Default)]
+struct SidecarState(Arc<Mutex<Option<CommandChild>>>);
 
 #[derive(serde::Serialize)]
 pub struct UpdateInfo {
@@ -205,6 +218,9 @@ fn set_macos_dock_icon() {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_panic_logger();
+    let sidecar_state = SidecarState::default();
+    #[allow(unused_variables)]
+    let sidecar_slot_for_exit = sidecar_state.0.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -212,6 +228,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
+        .manage(sidecar_state)
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -261,11 +278,18 @@ pub fn run() {
                 // lookup and surface any failure as a real error in
                 // backend.log.
                 let log_for_async = backend_log.clone();
+                let sidecar_slot = app.state::<SidecarState>().0.clone();
                 match app.shell().sidecar("sovlens-backend") {
                     Ok(cmd) => {
                         let cmd = cmd.args(["--port", "14793"]);
                         match cmd.spawn() {
-                            Ok((mut rx, _child)) => {
+                            Ok((mut rx, child)) => {
+                                // Park the CommandChild so RunEvent::Exit can
+                                // kill it. Dropping it here would leave the
+                                // sidecar holding port 14793 forever.
+                                if let Ok(mut slot) = sidecar_slot.lock() {
+                                    *slot = Some(child);
+                                }
                                 if let Ok(mut f) = std::fs::OpenOptions::new()
                                     .create(true).append(true).open(&backend_log)
                                 {
@@ -336,6 +360,18 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![reveal_in_explorer, copy_media_to_clipboard, open_logs_folder, read_recent_logs, check_for_updates])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(move |_app_handle, event| {
+            // Kill the sidecar on app exit so port 14793 is freed for the next
+            // launch. Without this, cmd+Q on macOS leaves the PyInstaller
+            // child running and the next launch hangs.
+            if let RunEvent::ExitRequested { .. } | RunEvent::Exit = event {
+                if let Ok(mut slot) = sidecar_slot_for_exit.lock() {
+                    if let Some(child) = slot.take() {
+                        let _ = child.kill();
+                    }
+                }
+            }
+        });
 }

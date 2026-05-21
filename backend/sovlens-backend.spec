@@ -18,11 +18,18 @@ block_cipher = None
 # Wrap each in try/except so a single missing/broken hook can't sink the
 # whole build silently — PyInstaller would otherwise crash mid-spec and
 # leave dist/ empty, which build.bat would then fail loudly on.
+# Track every failed collect_all() so we can hard-fail the build at the
+# bottom of this spec. A swallowed failure (broken hook, torch version skew)
+# previously yielded a binary missing critical DLLs that still passed the
+# 10MB build.bat size guard. Override only via env SOVLENS_ALLOW_PARTIAL_COLLECT=1.
+_COLLECT_FAILURES = []
+
 def _safe_collect(name):
     try:
         return collect_all(name)
     except Exception as exc:
         print(f"WARN collect_all({name}) failed: {exc!r}")
+        _COLLECT_FAILURES.append((name, repr(exc)))
         return ([], [], [])
 
 torch_datas, torch_binaries, torch_hidden = _safe_collect("torch")
@@ -35,6 +42,13 @@ wh_datas, wh_binaries, wh_hidden = _safe_collect("whisper")
 ld_datas, ld_binaries, ld_hidden = _safe_collect("lancedb")
 sd_datas, sd_binaries, sd_hidden = _safe_collect("scenedetect")
 ff_datas, ff_binaries, ff_hidden = _safe_collect("imageio_ffmpeg")
+
+if _COLLECT_FAILURES and not os.environ.get("SOVLENS_ALLOW_PARTIAL_COLLECT"):
+    _msg = "; ".join(f"{n}: {e}" for n, e in _COLLECT_FAILURES)
+    raise SystemExit(
+        f"FATAL: PyInstaller collect_all() failed for: {_msg}. "
+        "Set SOVLENS_ALLOW_PARTIAL_COLLECT=1 to override (NOT recommended for releases)."
+    )
 
 # ------------------------------------------------------------------
 # Hidden imports — libraries that PyInstaller can't auto-detect
