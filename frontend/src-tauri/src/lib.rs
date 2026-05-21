@@ -116,7 +116,7 @@ fn copy_file_reference(path: &str) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 fn copy_file_reference(path: &str) -> Result<(), String> {
     use clipboard_win::{formats, set_clipboard};
-    set_clipboard(formats::FileList, &[path.to_string()])
+    set_clipboard(formats::FileList, vec![path.to_string()])
         .map_err(|e| e.to_string())
 }
 
