@@ -62,3 +62,4 @@ frontend/src-tauri/binaries/sovlens-backend-*
 *.pem
 *.key
 tauri-updater-private.key
+secrets/
