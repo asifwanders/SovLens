@@ -115,10 +115,10 @@ fn copy_file_reference(path: &str) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn copy_file_reference(path: &str) -> Result<(), String> {
-    use clipboard_win::{formats, set_clipboard};
+    use clipboard_win::{formats::FileList, Clipboard, Setter};
     let files = [path.to_string()];
-    set_clipboard(formats::FileList, &files[..])
-        .map_err(|e| e.to_string())
+    let _clip = Clipboard::new_attempts(10).map_err(|e| e.to_string())?;
+    FileList.write_clipboard(&files[..]).map_err(|e| e.to_string())
 }
 
 #[cfg(target_os = "linux")]
