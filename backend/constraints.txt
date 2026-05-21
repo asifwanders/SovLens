@@ -1,0 +1,7 @@
+# Global pip constraints — enforce across all installs (direct or transitive).
+# Usage: pip install -c constraints.txt -r requirements.txt
+#
+# lancedb 0.14 still references np.NaN which numpy 2.x removed.
+numpy<2
+# opencv-python-headless >=4.11 declares numpy>=2 hard dependency; force older series.
+opencv-python-headless<4.11

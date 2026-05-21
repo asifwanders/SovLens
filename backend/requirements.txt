@@ -1,0 +1,20 @@
+fastapi>=0.128
+uvicorn[standard]>=0.39
+pydantic>=2.13
+lancedb>=0.14
+pyarrow>=21.0
+sentence-transformers>=5.1
+torch>=2.8
+scenedetect>=0.6.7
+imageio-ffmpeg>=0.6
+pillow>=11.1
+pillow-heif>=1.1
+scipy>=1.13
+openai-whisper>=20250625
+# numpy 2.x removes np.NaN which lancedb 0.14 relies on. Pin <2 until upstream catches up.
+numpy>=1.26,<2
+ultralytics>=8.4
+easyocr>=1.7
+# easyocr pulls opencv-python-headless; opencv>=4.11 declares numpy>=2 as a hard
+# dependency on Python>=3.9, which conflicts with lancedb's numpy<2 need.
+opencv-python-headless>=4.9,<4.11

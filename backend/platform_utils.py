@@ -1,0 +1,235 @@
+"""Cross-platform utility helpers for SovLens.
+
+Provides stable abstractions over OS differences (paths, encodings, hardware
+acceleration, subprocess encoding) so callers never need sys.platform guards.
+
+Python 3.9+.  No new pip dependencies.
+"""
+
+import os
+import sys
+import tempfile
+import subprocess
+from typing import List, Optional, Tuple  # noqa: F401 (Tuple exported for callers)
+
+# ---------------------------------------------------------------------------
+# Platform flags
+# ---------------------------------------------------------------------------
+
+IS_WINDOWS: bool = sys.platform == "win32"
+IS_MACOS: bool = sys.platform == "darwin"
+IS_LINUX: bool = not IS_WINDOWS and not IS_MACOS
+
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+_LEGACY_APP_DATA = os.path.join(os.path.expanduser("~"), ".sovlens")
+_app_data_migrated = False
+
+
+def get_app_data_dir() -> str:
+    """%LOCALAPPDATA%\\SovLens on Win, ~/Library/Application Support/SovLens on mac, ~/.sovlens on Linux.
+
+    Auto-migrates content from legacy ~/.sovlens on first call (mac+Win) so users
+    who installed before WS-X2 path migration don't lose folders.json / progress.json.
+    """
+    if IS_WINDOWS:
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        target = os.path.join(base, "SovLens")
+    elif IS_MACOS:
+        target = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "SovLens")
+    else:
+        # Linux already uses ~/.sovlens; no migration needed.
+        return _LEGACY_APP_DATA
+
+    # One-shot migration: copy files from ~/.sovlens that don't already exist in target.
+    global _app_data_migrated
+    if not _app_data_migrated:
+        _app_data_migrated = True
+        try:
+            if os.path.isdir(_LEGACY_APP_DATA):
+                os.makedirs(target, exist_ok=True)
+                for name in os.listdir(_LEGACY_APP_DATA):
+                    src = os.path.join(_LEGACY_APP_DATA, name)
+                    dst = os.path.join(target, name)
+                    if not os.path.exists(dst):
+                        try:
+                            if os.path.isdir(src):
+                                import shutil
+                                shutil.copytree(src, dst)
+                            else:
+                                import shutil
+                                shutil.copy2(src, dst)
+                            print(f"[platform_utils] Migrated legacy app data: {name}")
+                        except Exception as e:
+                            print(f"[platform_utils] Migrate failed for {name}: {e}")
+        except Exception as e:
+            print(f"[platform_utils] Legacy data migration scan failed: {e}")
+
+    return target
+
+
+def get_temp_dir() -> str:
+    """Return the system temporary directory via tempfile.gettempdir()."""
+    return tempfile.gettempdir()
+
+
+def normalize_path(p: str) -> str:
+    """Canonical storage form: os.path.normcase(os.path.abspath(p)).
+
+    On macOS/Linux normcase is identity (case preserved).
+    On Windows it lower-cases and converts forward-slashes to backslashes.
+    Use this for all path values stored in LanceDB and for comparison keys.
+    """
+    return os.path.normcase(os.path.abspath(p))
+
+
+# ---------------------------------------------------------------------------
+# Hardware acceleration
+# ---------------------------------------------------------------------------
+
+def detect_torch_device() -> str:
+    """Return 'cuda', 'mps', or 'cpu' based on available torch backends.
+
+    Importing torch is deferred so this module loads even without torch installed.
+    Falls back to 'cpu' on ImportError.
+    """
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda"
+        if torch.backends.mps.is_available():
+            return "mps"
+    except ImportError:
+        pass
+    return "cpu"
+
+
+# Whisper never uses MPS (known correctness issues).
+WHISPER_DEVICE: str = "cuda" if detect_torch_device() == "cuda" else "cpu"
+
+
+# ---------------------------------------------------------------------------
+# ffmpeg hw encoder/decoder detection (probed once at import, cached)
+# ---------------------------------------------------------------------------
+
+def _probe_ffmpeg_encoders() -> str:
+    """Return the raw stdout from ``ffmpeg -encoders``, or '' on failure."""
+    try:
+        ff = get_ffmpeg_exe()
+        result = run_subprocess([ff, "-encoders"], timeout=15)
+        return result.stdout
+    except Exception:
+        return ""
+
+
+_FFMPEG_ENCODER_LIST: str = _probe_ffmpeg_encoders()  # cached at import time
+
+
+def detect_hwaccel_encoder() -> List[str]:
+    """Return ffmpeg output args for the best available H.264 encoder.
+
+    Priority:
+    * Windows + CUDA  -> h264_nvenc
+    * macOS           -> h264_videotoolbox
+    * Else            -> libx264 ultrafast
+
+    Result is derived from the encoder list probed at import time.
+    """
+    if IS_WINDOWS and "h264_nvenc" in _FFMPEG_ENCODER_LIST:
+        return ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "23"]
+    if IS_MACOS and "h264_videotoolbox" in _FFMPEG_ENCODER_LIST:
+        return ["-c:v", "h264_videotoolbox", "-b:v", "5M"]
+    return ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23"]
+
+
+def detect_hwaccel_decoder() -> List[str]:
+    """Return ffmpeg input args (before -i) for hardware-accelerated decode.
+
+    * Windows + CUDA  -> ['-hwaccel', 'cuda']
+    * macOS           -> ['-hwaccel', 'videotoolbox']
+    * Else            -> []
+    """
+    if IS_WINDOWS and "h264_nvenc" in _FFMPEG_ENCODER_LIST:
+        return ["-hwaccel", "cuda"]
+    if IS_MACOS:
+        return ["-hwaccel", "videotoolbox"]
+    return []
+
+
+# ---------------------------------------------------------------------------
+# WebView codec support
+# ---------------------------------------------------------------------------
+
+def webview_plays_vp9() -> bool:
+    """True on Windows/Linux (Chromium / WebView2); False on macOS (WKWebView)."""
+    return not IS_MACOS
+
+
+def webview_plays_hevc() -> bool:
+    """True on macOS (VideoToolbox) and conservatively False elsewhere.
+
+    Windows 11 *can* decode HEVC with a hardware decoder but requires the
+    optional HEVC Video Extensions store package — we default False to avoid
+    silent playback failures.
+    """
+    return IS_MACOS
+
+
+# ---------------------------------------------------------------------------
+# ffmpeg executable (cached)
+# ---------------------------------------------------------------------------
+
+_FFMPEG_EXE: Optional[str] = None
+
+
+def get_ffmpeg_exe() -> str:
+    """Return the path to the bundled ffmpeg executable via imageio_ffmpeg.
+
+    Result is cached after the first call.
+    """
+    global _FFMPEG_EXE
+    if _FFMPEG_EXE is None:
+        from imageio_ffmpeg import get_ffmpeg_exe as _get  # type: ignore
+        _FFMPEG_EXE = _get()
+    return _FFMPEG_EXE
+
+
+# ---------------------------------------------------------------------------
+# Subprocess helper
+# ---------------------------------------------------------------------------
+
+def run_subprocess(cmd: List[str], **kwargs) -> subprocess.CompletedProcess:
+    """Run *cmd* with UTF-8 text mode as default.
+
+    Fixes the Windows cp1252 default encoding that breaks non-ASCII ffmpeg
+    output parsing.  Callers may override any kwarg (e.g. timeout, env).
+
+    Defaults applied unless overridden:
+        encoding='utf-8', errors='replace', text=True, capture_output=True
+    """
+    kwargs.setdefault("encoding", "utf-8")
+    kwargs.setdefault("errors", "replace")
+    kwargs.setdefault("text", True)
+    kwargs.setdefault("capture_output", True)
+    return subprocess.run(cmd, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# File-manager reveal
+# ---------------------------------------------------------------------------
+
+def reveal_in_file_manager_cmd(path: str) -> List[str]:
+    """Return the OS command that reveals *path* in the native file manager.
+
+    * Windows : ['explorer.exe', '/select,', path]
+    * macOS   : ['open', '-R', path]
+    * Linux   : ['xdg-open', <parent directory>]
+    """
+    if IS_WINDOWS:
+        return ["explorer.exe", f"/select,{path}"]
+    if IS_MACOS:
+        return ["open", "-R", path]
+    return ["xdg-open", os.path.dirname(path)]
