@@ -19,3 +19,16 @@
   nsExec::Exec 'taskkill /F /IM sovlens-backend.exe /T'
   Sleep 500
 !macroend
+
+; After uninstall, optionally wipe the app data dir (LanceDB index, logs,
+; transcoded HLS cache, YOLO crops, folders.json, progress.json). Model
+; caches under %USERPROFILE% (HuggingFace, Whisper, EasyOCR) are deliberately
+; left alone because other AI tools on the machine may share them.
+!macro NSIS_HOOK_POSTUNINSTALL
+  MessageBox MB_YESNO|MB_ICONQUESTION \
+    "Also delete SovLens data (search index, logs, cache)?$\r$\n$\r$\nYou'll lose your search index and will need to re-scan your folders if you reinstall." \
+    /SD IDNO IDNO sovlens_keep_data
+    DetailPrint "Removing SovLens app data..."
+    RMDir /r "$LOCALAPPDATA\SovLens"
+  sovlens_keep_data:
+!macroend

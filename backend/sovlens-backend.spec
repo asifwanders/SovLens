@@ -15,16 +15,26 @@ block_cipher = None
 # Torch + adjacent: use collect_all so every lazy submodule, data file,
 # and native DLL is bundled. Hand-listing reliably misses things like
 # torch._dynamo, torch.distributed.config, MKL DLLs on Win, etc.
-torch_datas, torch_binaries, torch_hidden = collect_all("torch")
-tv_datas, tv_binaries, tv_hidden = collect_all("torchvision")
-tr_datas, tr_binaries, tr_hidden = collect_all("transformers")
-st_datas, st_binaries, st_hidden = collect_all("sentence_transformers")
-ul_datas, ul_binaries, ul_hidden = collect_all("ultralytics")
-eo_datas, eo_binaries, eo_hidden = collect_all("easyocr")
-wh_datas, wh_binaries, wh_hidden = collect_all("whisper")
-ld_datas, ld_binaries, ld_hidden = collect_all("lancedb")
-sd_datas, sd_binaries, sd_hidden = collect_all("scenedetect")
-ff_datas, ff_binaries, ff_hidden = collect_all("imageio_ffmpeg")
+# Wrap each in try/except so a single missing/broken hook can't sink the
+# whole build silently — PyInstaller would otherwise crash mid-spec and
+# leave dist/ empty, which build.bat would then fail loudly on.
+def _safe_collect(name):
+    try:
+        return collect_all(name)
+    except Exception as exc:
+        print(f"WARN collect_all({name}) failed: {exc!r}")
+        return ([], [], [])
+
+torch_datas, torch_binaries, torch_hidden = _safe_collect("torch")
+tv_datas, tv_binaries, tv_hidden = _safe_collect("torchvision")
+tr_datas, tr_binaries, tr_hidden = _safe_collect("transformers")
+st_datas, st_binaries, st_hidden = _safe_collect("sentence_transformers")
+ul_datas, ul_binaries, ul_hidden = _safe_collect("ultralytics")
+eo_datas, eo_binaries, eo_hidden = _safe_collect("easyocr")
+wh_datas, wh_binaries, wh_hidden = _safe_collect("whisper")
+ld_datas, ld_binaries, ld_hidden = _safe_collect("lancedb")
+sd_datas, sd_binaries, sd_hidden = _safe_collect("scenedetect")
+ff_datas, ff_binaries, ff_hidden = _safe_collect("imageio_ffmpeg")
 
 # ------------------------------------------------------------------
 # Hidden imports — libraries that PyInstaller can't auto-detect

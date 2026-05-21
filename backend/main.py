@@ -1093,6 +1093,44 @@ def models_warmup(req: WarmupRequest, background_tasks: BackgroundTasks):
     return {"message": f"Warming up {req.model}", "model": req.model}
 
 
+@app.post("/admin/wipe_data")
+def admin_wipe_data():
+    """Danger: wipe the entire SovLens app data directory.
+
+    Deletes the LanceDB index, logs, HLS cache, YOLO crops, folders.json,
+    progress.json — everything under platform_utils.get_app_data_dir().
+    Model caches under ~/.cache (HuggingFace, Whisper) and ~/.EasyOCR are
+    intentionally left alone because other AI tools may share them.
+
+    The backend process exits immediately after responding so file locks
+    (LanceDB, log handlers) release cleanly. The Tauri shell will see the
+    sidecar die; the user restarts the app to get a fresh empty state.
+    """
+    import shutil
+    import threading as _th
+
+    data_dir = platform_utils.get_app_data_dir()
+
+    def _wipe_and_exit():
+        # Tiny delay so the HTTP response actually flushes to the client.
+        import time as _time
+        _time.sleep(0.5)
+        try:
+            # Best-effort close of the LanceDB connection so Windows file
+            # locks release before rmtree.
+            try:
+                core.db = None  # type: ignore[assignment]
+            except Exception:
+                pass
+            if os.path.isdir(data_dir):
+                shutil.rmtree(data_dir, ignore_errors=True)
+        finally:
+            os._exit(0)
+
+    _th.Thread(target=_wipe_and_exit, daemon=True).start()
+    return {"status": "ok", "wiped": data_dir}
+
+
 if __name__ == "__main__":
     import sys
     import argparse

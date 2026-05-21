@@ -129,6 +129,12 @@ pip install torch --index-url https://download.pytorch.org/whl/cu121
 pip install -c constraints.txt -r requirements.txt
 ```
 
+## Uninstall
+
+- **Windows**: use *Add or remove programs* → SovLens → Uninstall. The uninstaller asks whether to also delete SovLens data (search index, logs, cache under `%LOCALAPPDATA%\SovLens`). Click **No** to keep your index for a future reinstall.
+- **macOS**: drag *SovLens.app* to the Trash. Data lives at `~/Library/Application Support/SovLens/`; remove it manually, or use Settings → *Danger zone* → **Reset All Data** before uninstalling to wipe it from inside the app.
+- Shared AI model caches (`~/.cache/huggingface`, `~/.cache/whisper`, `~/.EasyOCR`) are never auto-deleted — other AI tools on your machine may use them.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Issues and pull requests welcome.

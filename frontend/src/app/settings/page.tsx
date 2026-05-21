@@ -56,6 +56,9 @@ export default function SettingsPage() {
   const [toast, setToast] = useState<string | null>(null);
   const [showReindexModal, setShowReindexModal] = useState(false);
   const [reindexMessage, setReindexMessage] = useState<string | null>(null);
+  const [showWipeModal, setShowWipeModal] = useState(false);
+  const [wipeMessage, setWipeMessage] = useState<string | null>(null);
+  const [wipeInFlight, setWipeInFlight] = useState(false);
   const [isIngesting, setIsIngesting] = useState(false);
   const [reindexInFlight, setReindexInFlight] = useState(false);
 
@@ -281,6 +284,18 @@ export default function SettingsPage() {
     } catch {
       setReindexMessage("Could not reach backend — is SovLens running?");
       setTimeout(() => setReindexMessage(null), 6000);
+    }
+  };
+
+  const confirmWipe = async () => {
+    setShowWipeModal(false);
+    setWipeInFlight(true);
+    setWipeMessage("Wiping data and stopping backend… Please quit and reopen SovLens.");
+    try {
+      await fetch(`${API_BASE}/admin/wipe_data`, { method: "POST" });
+    } catch {
+      // Backend will exit immediately after responding — the fetch may
+      // surface a network error which is fine; treat it as success.
     }
   };
 
@@ -518,7 +533,56 @@ export default function SettingsPage() {
             </button>
           </div>
         )}
+        {/* Danger zone */}
+        <div className="mt-8 pt-6 border-t border-red-500/30">
+          <h2 className="text-lg font-medium mb-2 text-red-500">Danger zone</h2>
+          <p className="text-sm text-foreground/70 mb-3">
+            Permanently delete all SovLens data: search index, logs, transcoded video cache,
+            object-detection crops, folder list, and progress. AI model weights in your shared
+            cache (HuggingFace, Whisper, EasyOCR) are not touched. The app will quit; reopen
+            it for a fresh start. This cannot be undone.
+          </p>
+          {wipeMessage && (
+            <p className="text-sm text-red-500/90 mb-3 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30">
+              {wipeMessage}
+            </p>
+          )}
+          <button
+            onClick={() => setShowWipeModal(true)}
+            disabled={wipeInFlight}
+            className="px-4 py-2 rounded-lg border transition-colors text-sm bg-red-500/10 hover:bg-red-500/20 text-red-500 border-red-500/30 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {wipeInFlight ? "Wiping…" : "Reset All Data"}
+          </button>
+        </div>
       </div>
+
+      {/* Reset-data confirmation modal */}
+      {showWipeModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="glass-panel rounded-2xl p-6 max-w-sm w-full mx-4 shadow-xl">
+            <h3 className="text-lg font-semibold mb-2 text-red-500">Delete all SovLens data?</h3>
+            <p className="text-sm text-foreground/70 mb-6">
+              This deletes the search index, logs, and cache. You&apos;ll need to re-scan your
+              folders next time you open SovLens. This cannot be undone.
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setShowWipeModal(false)}
+                className="px-4 py-2 rounded-lg border border-panel-border hover:bg-foreground/5 transition-colors text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmWipe}
+                className="px-4 py-2 rounded-lg bg-red-500 text-white hover:bg-red-500/90 transition-colors text-sm"
+              >
+                Delete everything
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Re-index confirmation modal */}
       {showReindexModal && (

@@ -47,5 +47,24 @@ if not exist "%SRC%" (
 )
 
 copy /Y "%SRC%" "%DST%"
-echo =^> Wrote: %DST%
+if errorlevel 1 (
+    echo ERROR: copy failed >&2
+    exit /b 1
+)
+
+REM Verify post-copy that the destination still exists and has bytes.
+REM Defender real-time scanning has been known to quarantine large
+REM PyInstaller bundles between write and the next mmap read, which
+REM then fails NSIS with os error 2.
+if not exist "%DST%" (
+    echo ERROR: dst vanished post-copy ^(likely Defender^): %DST% >&2
+    exit /b 1
+)
+for %%I in ("%DST%") do (
+    echo =^> Wrote: %DST% ^(%%~zI bytes^)
+    if %%~zI LSS 10000000 (
+        echo ERROR: sidecar binary suspiciously small ^(<10 MB^) >&2
+        exit /b 1
+    )
+)
 endlocal

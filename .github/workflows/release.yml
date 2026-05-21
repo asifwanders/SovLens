@@ -201,6 +201,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Defender real-time scanning will quarantine / lock the freshly
+      # written PyInstaller onefile EXE (~1 GB with torch + collect_all)
+      # between the build.bat copy step and NSIS's mmap read, causing
+      # "failed creating mmap of ...sovlens-backend-...exe" + os error 2
+      # in the bundle step. Exclude the runner workspace + Python cache
+      # dirs so Defender stops touching our artifacts mid-flight.
+      - name: Disable Defender for workspace
+        shell: pwsh
+        run: |
+          try {
+            Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
+            Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP"
+            Add-MpPreference -ExclusionProcess "pyinstaller.exe"
+            Add-MpPreference -ExclusionProcess "makensis.exe"
+            Add-MpPreference -ExclusionProcess "sovlens-backend.exe"
+            Write-Host "Defender exclusions added."
+          } catch {
+            Write-Warning "Defender exclusion failed (non-fatal): $_"
+          }
+
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
