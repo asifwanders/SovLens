@@ -72,6 +72,18 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      - name: Verify signing key reaches runner
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY secret is empty or unset"
+            exit 1
+          fi
+          echo "Secret length: ${#TAURI_SIGNING_PRIVATE_KEY} chars"
+          echo "First 24 chars: ${TAURI_SIGNING_PRIVATE_KEY:0:24}..."
+        shell: bash
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -150,6 +162,18 @@ jobs:
       - name: Install Node deps
         working-directory: frontend
         run: npm ci
+
+      - name: Verify signing key reaches runner
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY secret is empty or unset"
+            exit 1
+          fi
+          echo "Secret length: ${#TAURI_SIGNING_PRIVATE_KEY} chars"
+          echo "First 24 chars: ${TAURI_SIGNING_PRIVATE_KEY:0:24}..."
+        shell: bash
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
@@ -244,6 +268,18 @@ jobs:
       - name: Install Node deps
         working-directory: frontend
         run: npm ci
+
+      - name: Verify signing key reaches runner (win)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrEmpty($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            Write-Error "TAURI_SIGNING_PRIVATE_KEY secret is empty or unset"
+            exit 1
+          }
+          Write-Host "Secret length: $($env:TAURI_SIGNING_PRIVATE_KEY.Length) chars"
+          Write-Host "First 24 chars: $($env:TAURI_SIGNING_PRIVATE_KEY.Substring(0,24))..."
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
