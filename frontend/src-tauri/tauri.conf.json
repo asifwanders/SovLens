@@ -26,7 +26,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["app", "nsis"],
     "publisher": "SovStac",
     "copyright": "Copyright © SovStac 2026",
     "homepage": "https://sovstac.com",

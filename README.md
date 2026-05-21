@@ -43,17 +43,19 @@ Pre-built installers are on the [Releases page](https://github.com/asifwanders/S
 
 | Platform | File | Size |
 |----------|------|------|
-| macOS (Apple Silicon) | `SovLens_x.y.z_aarch64.dmg` | ~80 MB |
-| macOS (Intel) | `SovLens_x.y.z_x64.dmg` | ~80 MB |
+| macOS (Apple Silicon) | `SovLens_x.y.z_aarch64.app.tar.gz` | ~80 MB |
+| macOS (Intel) | `SovLens_x.y.z_x64.app.tar.gz` | ~80 MB |
 | Windows 10/11 | `SovLens_x.y.z_x64-setup.exe` | ~80 MB |
 
 The installer is small because AI models download on first use (~1.5 GB total, only what each level needs). The app shows a progress bar.
 
 ### First-run security warning
 
-**macOS:** double-click the `.dmg`, drag SovLens to Applications. When you launch:
+**macOS:** double-click the `.app.tar.gz` to extract, drag `SovLens.app` to your Applications folder. When you launch:
 - *"SovLens can't be opened because Apple cannot check it for malicious software."*
 - Right-click the app → **Open** → **Open**. One-time only.
+
+If Gatekeeper still blocks, run once in Terminal: `xattr -dr com.apple.quarantine /Applications/SovLens.app`
 
 **Windows:** double-click the `.exe`. SmartScreen says:
 - *"Windows protected your PC."*
