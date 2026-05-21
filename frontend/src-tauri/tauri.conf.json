@@ -47,7 +47,7 @@
   "plugins": {
     "updater": {
       "active": true,
-      "pubkey": "RWTePG/I/YHINrWhy6RwxVNNXDr3/qZ+B+1j4pgj+jAE/ae78XPs+7fO",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY2RTY1NUNDQkEwOEQ5RgpSV1NmamFETFhHVnVEN216YlA1QzhNTVJzK2UzSEFDR3pVVStuckNuVm01RlZmM0FJY1h5VW0xaQo=",
       "endpoints": [
         "https://github.com/asifwanders/SovLens/releases/latest/download/latest.json"
       ]
