@@ -165,6 +165,7 @@ Persistent context for future sessions. Update when you discover new traps.
 15. **PyInstaller `upx=True` on Win** — Defender heuristic flag + corrupts torch DLLs. Always `upx=False` for Win bundles with torch
 16. **Subprocess spawned from PyInstaller `console=False` GUI app pops `conhost.exe` window on each child** — set `creationflags=0x08000000` (CREATE_NO_WINDOW) in `subprocess.run` on Windows
 17. **Tauri NSIS defaults to `perMachine`** requiring admin → SmartScreen + UAC double-prompt. Set `bundle.windows.nsis.installMode: "currentUser"`
+18. **Tauri NSIS default template kills main exe but NOT sidecar** — upgrade installer fails with "Error opening file for writing: ...sovlens-backend.exe". Add `installerHooks: "./windows/hooks.nsh"` with `NSIS_HOOK_PREINSTALL` + `NSIS_HOOK_PREUNINSTALL` macros running `taskkill /F /IM sovlens-backend.exe /T`
 
 ---
 
