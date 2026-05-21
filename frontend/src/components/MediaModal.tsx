@@ -32,12 +32,12 @@ export default function MediaModal({ item, onClose, onNext, onPrev, hasNext, has
 
   // Build HLS playlist URL for video/audio_segment items
   const hlsUrl = isVideo && item !== null
-    ? `http://localhost:14793/hls/${encodeURIComponent(item.video_id ?? item.id)}/playlist.m3u8?path=${encodeURIComponent(item.path)}`
+    ? `http://127.0.0.1:14793/hls/${encodeURIComponent(item.video_id ?? item.id)}/playlist.m3u8?path=${encodeURIComponent(item.path)}`
     : null;
 
   // Direct mp4 fallback used by hls.js on fatal error and by the last-resort path
   const fallbackUrl = isVideo && item !== null
-    ? `http://localhost:14793/video?path=${encodeURIComponent(item.path)}`
+    ? `http://127.0.0.1:14793/video?path=${encodeURIComponent(item.path)}`
     : undefined;
 
   // Attach HLS source (no-op for images; hook guards on null src)
@@ -63,7 +63,7 @@ export default function MediaModal({ item, onClose, onNext, onPrev, hasNext, has
 
   const srcUrl = isVideo
     ? undefined // src is controlled by useHls
-    : `http://localhost:14793/image?path=${encodeURIComponent(item.path)}`;
+    : `http://127.0.0.1:14793/image?path=${encodeURIComponent(item.path)}`;
 
   const handleCopy = async () => {
     if (!item) return;

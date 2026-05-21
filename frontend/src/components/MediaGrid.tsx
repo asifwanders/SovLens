@@ -21,7 +21,7 @@ interface MediaTileProps {
 function MediaTile({ item, onItemClick }: MediaTileProps) {
   const { copied, trigger } = useCopyFeedback();
 
-  const srcUrl = `http://localhost:14793/image?path=${encodeURIComponent(item.thumbnail || item.path)}`;
+  const srcUrl = `http://127.0.0.1:14793/image?path=${encodeURIComponent(item.thumbnail || item.path)}`;
   const showTimestamp = (item.type === "video" || item.type === "audio_segment") && typeof item.timestamp === "number" && item.timestamp > 0;
   const showScore = typeof item.score === "number";
   const showSnippet = !!item.text_snippet;

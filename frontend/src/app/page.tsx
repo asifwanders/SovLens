@@ -8,7 +8,7 @@ import MediaModal from "@/components/MediaModal";
 import { RefreshCw, FolderPlus, FileImage, Image as ImageIcon, Upload } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 
-const API = "http://localhost:14793";
+const API = "http://127.0.0.1:14793";
 const SESSION_KEY = "sovlens.firstLoadDone";
 const SYNC_MIN_MS = 600;
 
@@ -217,17 +217,21 @@ export default function Home() {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const selectedPath = await open({ directory: true, multiple: false });
       if (selectedPath && typeof selectedPath === "string") {
-        await fetch(`${API}/add_folder`, {
+        showStatus("Adding folder…");
+        const res = await fetch(`${API}/add_folder`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ folder_path: selectedPath }),
         });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        showStatus("Folder added");
         setOffset(0);
         setHasMore(true);
         fetchMedia(0);
       }
     } catch (e) {
-      console.error(e);
+      console.error("add folder failed", e);
+      showStatus(`Add folder failed: ${String(e)}`);
     }
   };
 
@@ -238,13 +242,9 @@ export default function Home() {
       const result = await open({
         multiple: true,
         filters: [
-          {
-            name: "Media",
-            extensions: [
-              "jpg", "jpeg", "png", "gif", "webp", "heic", "heif",
-              "mp4", "mov", "mkv", "webm", "avi",
-            ],
-          },
+          { name: "Images", extensions: ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif"] },
+          { name: "Videos", extensions: ["mp4", "mov", "mkv", "webm", "avi"] },
+          { name: "All Files", extensions: ["*"] },
         ],
       });
       if (!result) return;
@@ -266,7 +266,7 @@ export default function Home() {
       }, 2000);
     } catch (e) {
       console.error("add media failed", e);
-      showStatus("Could not open file picker.");
+      showStatus(`Could not open file picker: ${String(e)}`);
     }
   };
 

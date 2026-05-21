@@ -36,7 +36,7 @@ interface ModelsStatusResponse {
   ocr:     ModelStatus;
 }
 
-const API_BASE = "http://localhost:14793";
+const API_BASE = "http://127.0.0.1:14793";
 
 export default function SettingsPage() {
   const [config, setConfig] = useState<ConfigResponse | null>(null);

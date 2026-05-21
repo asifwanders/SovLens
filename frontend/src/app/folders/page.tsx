@@ -32,7 +32,7 @@ export default function FoldersPage() {
 
   const refresh = useCallback(async () => {
     try {
-      const res = await fetch("http://localhost:14793/folders");
+      const res = await fetch("http://127.0.0.1:14793/folders");
       if (res.ok) {
         const data = (await res.json()) as { items: FolderInfo[] };
         setFolders(data.items);
@@ -54,7 +54,7 @@ export default function FoldersPage() {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const folder = await open({ directory: true, multiple: false });
       if (!folder || typeof folder !== "string") return;
-      const res = await fetch("http://localhost:14793/add_folder", {
+      const res = await fetch("http://127.0.0.1:14793/add_folder", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ folder_path: folder }),
@@ -85,7 +85,7 @@ export default function FoldersPage() {
 
   const handleDelete = async (paths: string[]) => {
     try {
-      const res = await fetch("http://localhost:14793/folders", {
+      const res = await fetch("http://127.0.0.1:14793/folders", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ paths }),

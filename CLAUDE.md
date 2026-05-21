@@ -155,6 +155,10 @@ Persistent context for future sessions. Update when you discover new traps.
 5. **Forgetting to delete + re-tag** — workflow only triggers on tag push, not main push
 6. **Pasting key contents with surrounding whitespace** into GitHub Secrets
 7. **`bundle.createUpdaterArtifacts`** — easiest single config to forget
+8. **`uvicorn.run("main:app", reload=True)` in PyInstaller frozen exe** — reloader re-execs the bootloader → backend never binds. Use `uvicorn.run(app, reload=False)` with the app object, not import string
+9. **Dropping `_rx` from `sidecar.spawn()`** — discards stdout/stderr forever. ALWAYS pipe to `backend.log` via `tauri::async_runtime::spawn` reading `CommandEvent::Stdout/Stderr/Error/Terminated`
+10. **`localhost` on Windows resolves IPv6 `::1` first** — uvicorn binds IPv4 only → 1-2s delay or refused. Use `127.0.0.1` in all frontend fetch URLs
+11. **Tauri file picker `filters` with too many extensions in one group** — Windows `IFileDialog` may reject. Split into multiple filter groups + add `All Files: *` fallback
 
 ---
 

@@ -930,5 +930,21 @@ def models_warmup(req: WarmupRequest, background_tasks: BackgroundTasks):
 
 
 if __name__ == "__main__":
+    import sys
+    import argparse
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=14793, reload=True)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=14793)
+    parser.add_argument("--host", default="127.0.0.1")
+    args, _ = parser.parse_known_args()
+    # IMPORTANT: pass the `app` object (not "main:app" import string) and
+    # reload=False. Under PyInstaller's frozen exe, reload=True + import-string
+    # causes uvicorn's reloader to re-exec the bootloader → backend never binds.
+    frozen = getattr(sys, "frozen", False)
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        reload=False if frozen else False,  # keep reload off in dev too; use --reload if needed
+        log_level="info",
+    )

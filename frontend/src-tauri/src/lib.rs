@@ -60,13 +60,20 @@ fn open_logs_folder() -> Result<(), String> {
 
 #[tauri::command]
 fn read_recent_logs(max_bytes: usize) -> Result<String, String> {
-    let path = dirs::data_local_dir().or_else(dirs::home_dir)
-        .map(|p| p.join("SovLens").join("logs").join("panic.log"))
+    let dir = dirs::data_local_dir().or_else(dirs::home_dir)
+        .map(|p| p.join("SovLens").join("logs"))
         .ok_or("no logs dir")?;
-    if !path.exists() { return Ok(String::new()); }
-    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-    let start = bytes.len().saturating_sub(max_bytes);
-    Ok(String::from_utf8_lossy(&bytes[start..]).into_owned())
+    let mut out = String::new();
+    for name in ["panic.log", "backend.log"] {
+        let path = dir.join(name);
+        if !path.exists() { continue; }
+        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        let start = bytes.len().saturating_sub(max_bytes);
+        out.push_str(&format!("===== {} =====\n", name));
+        out.push_str(&String::from_utf8_lossy(&bytes[start..]));
+        out.push_str("\n\n");
+    }
+    Ok(out)
 }
 
 use std::path::Path;
@@ -223,24 +230,95 @@ pub fn run() {
             // In dev mode, run `python main.py` separately as before.
             #[cfg(not(debug_assertions))]
             {
+                use tauri_plugin_shell::process::CommandEvent;
+                use std::io::Write;
+
+                // Logs dir (same as panic_logger uses)
+                let log_dir = dirs::data_local_dir()
+                    .or_else(dirs::home_dir)
+                    .map(|p| p.join("SovLens").join("logs"))
+                    .expect("logs dir");
+                let _ = std::fs::create_dir_all(&log_dir);
+                let backend_log = log_dir.join("backend.log");
+
+                // Always write a startup stamp so users have evidence the
+                // shell got this far even if the sidecar itself never starts.
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true).append(true).open(&backend_log)
+                {
+                    let _ = writeln!(
+                        f,
+                        "[{}] BOOT tauri shell starting sidecar",
+                        chrono::Utc::now().to_rfc3339()
+                    );
+                }
+
                 // Guard against the sidecar binary being absent or an empty
                 // placeholder (common when PyInstaller step was skipped).
                 let bin_path = app
                     .path()
                     .resolve("sovlens-backend", tauri::path::BaseDirectory::Resource);
-                let should_spawn = match bin_path {
-                    Ok(ref p) => std::fs::metadata(p)
-                        .map(|m| m.len() > 4096)
-                        .unwrap_or(false),
-                    Err(_) => false,
+                let (should_spawn, resolved_path, size) = match bin_path {
+                    Ok(ref p) => {
+                        let sz = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+                        (sz > 4096, p.display().to_string(), sz)
+                    }
+                    Err(ref e) => (false, format!("ERR: {}", e), 0),
                 };
+
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true).append(true).open(&backend_log)
+                {
+                    let _ = writeln!(
+                        f,
+                        "[{}] BOOT sidecar resolved={} size={} spawn={}",
+                        chrono::Utc::now().to_rfc3339(),
+                        resolved_path,
+                        size,
+                        should_spawn
+                    );
+                }
+
                 if should_spawn {
                     let sidecar_command = app
                         .shell()
                         .sidecar("sovlens-backend")
                         .expect("failed to create sidecar")
                         .args(["--port", "14793"]);
-                    let (_rx, _child) = sidecar_command.spawn().expect("failed to spawn sidecar");
+                    let (mut rx, _child) = sidecar_command
+                        .spawn()
+                        .expect("failed to spawn sidecar");
+
+                    // Forward sidecar stdout/stderr to backend.log forever.
+                    // Without this, Python crashes are invisible.
+                    let log_path = backend_log.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let mut f = std::fs::OpenOptions::new()
+                            .create(true).append(true).open(&log_path).ok();
+                        while let Some(event) = rx.recv().await {
+                            if let Some(ref mut file) = f {
+                                let ts = chrono::Utc::now().to_rfc3339();
+                                let _ = match event {
+                                    CommandEvent::Stdout(b) => writeln!(
+                                        file, "[{}] OUT {}", ts,
+                                        String::from_utf8_lossy(&b).trim_end()
+                                    ),
+                                    CommandEvent::Stderr(b) => writeln!(
+                                        file, "[{}] ERR {}", ts,
+                                        String::from_utf8_lossy(&b).trim_end()
+                                    ),
+                                    CommandEvent::Error(e) => writeln!(
+                                        file, "[{}] ERR spawn-error: {}", ts, e
+                                    ),
+                                    CommandEvent::Terminated(p) => writeln!(
+                                        file, "[{}] ERR sidecar terminated code={:?} signal={:?}",
+                                        ts, p.code, p.signal
+                                    ),
+                                    _ => Ok(()),
+                                };
+                            }
+                        }
+                    });
                 } else {
                     eprintln!(
                         "WARN: sovlens-backend sidecar binary missing or too small, skipping spawn"

@@ -69,7 +69,7 @@ export default function SearchPage() {
     setIsSearching(true);
 
     try {
-      const res = await fetch("http://localhost:14793/search", {
+      const res = await fetch("http://127.0.0.1:14793/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: q, limit: 40 }),
@@ -95,7 +95,7 @@ export default function SearchPage() {
       setSubmittedQuery(q);
       setShowHistory(false);
       setIsSearching(true);
-      fetch("http://localhost:14793/search", {
+      fetch("http://127.0.0.1:14793/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: q, limit: 40 }),
