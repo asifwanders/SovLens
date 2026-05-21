@@ -55,7 +55,11 @@ The installer is small because AI models download on first use (~1.5 GB total, o
 - *"SovLens can't be opened because Apple cannot check it for malicious software."*
 - Right-click the app → **Open** → **Open**. One-time only.
 
-If Gatekeeper still blocks, run once in Terminal: `xattr -dr com.apple.quarantine /Applications/SovLens.app`
+If Gatekeeper says **"SovLens is damaged and can't be opened"** instead, browsers (Firefox, Chrome) tag the download with `com.apple.quarantine` which Gatekeeper refuses to skip via right-click. Strip it once in Terminal:
+```bash
+xattr -dr com.apple.quarantine /Applications/SovLens.app
+```
+Then double-click normally. This is a one-time fix per install.
 
 **Windows:** double-click the `.exe`. SmartScreen says:
 - *"Windows protected your PC."*
