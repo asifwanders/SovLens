@@ -18,10 +18,12 @@
   StrCpy $0 0
   ${Do}
     Sleep 500
-    nsExec::ExecToStack 'tasklist /FI "IMAGENAME eq sovlens-backend.exe" /NH'
+    ; findstr exits 0 when sidecar still present, 1 when gone. Avoids
+    ; LogicLib's missing string-contains operator (NSIS has no native
+    ; one without the StrFunc.nsh plugin).
+    nsExec::Exec 'cmd /c tasklist /FI "IMAGENAME eq sovlens-backend.exe" /NH | findstr /I "sovlens-backend.exe" >nul'
     Pop $1 ; exit code
-    Pop $2 ; stdout
-    ${If} $2 !S~ "sovlens-backend.exe"
+    ${If} $1 != 0
       ${Break}
     ${EndIf}
     IntOp $0 $0 + 1
