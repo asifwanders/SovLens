@@ -227,6 +227,9 @@ def get_or_build_segment(src: str, idx: int) -> str:
         encoder_args = platform_utils.detect_hwaccel_encoder()
 
         # Compute the actual duration for this segment (handles last segment).
+        # Also bounds-check idx against playlist length to avoid feeding
+        # ffmpeg a negative -t (which fails opaquely). Out-of-range -> IndexError
+        # so the HTTP layer can map it to a clean 404.
         meta_path = os.path.join(cache_dir, "meta.json")
         seg_actual_duration: float = float(SEGMENT_DURATION)
         if os.path.exists(meta_path):
@@ -234,9 +237,20 @@ def get_or_build_segment(src: str, idx: int) -> str:
                 with open(meta_path) as _mf:
                     _meta = json.load(_mf)
                 total_dur: float = float(_meta.get("duration", 0))
+                n_segments_meta = int(_meta.get("segments", 0))
+                if n_segments_meta > 0 and idx >= n_segments_meta:
+                    raise IndexError(
+                        f"segment idx {idx} out of range (playlist has {n_segments_meta} segments)"
+                    )
                 if total_dur > 0:
                     remaining = total_dur - start
+                    if remaining <= 0:
+                        raise IndexError(
+                            f"segment idx {idx} starts at {start}s, past duration {total_dur}s"
+                        )
                     seg_actual_duration = min(float(SEGMENT_DURATION), remaining)
+            except IndexError:
+                raise
             except Exception:
                 pass
 

@@ -133,6 +133,75 @@ def get_status():
         "model_fallback": requested != effective,      # True when a fallback is in effect
     }
 
+def _parse_range_header(range_header: str, file_size: int):
+    """Parse an HTTP Range header per RFC 7233.
+
+    Returns one of:
+      ("full", None)            -> caller should serve the whole file (header malformed/ignorable)
+      ("ok", (start, end))      -> valid satisfiable range, inclusive end
+      ("invalid", None)         -> 416 Range Not Satisfiable
+
+    Handles, with explicit reasoning:
+      - "bytes=start-end"           valid, both ends present
+      - "bytes=start-"              open-ended; end clamped to file_size-1
+      - "bytes=-N"                  suffix range; last N bytes (start = max(0, size-N))
+      - "bytes=-"                   malformed -> 416
+      - "bytes=0-100,200-300"       multipart: not supported -> 416 (cleanly)
+      - non-integer values          -> 416
+      - start > end                 -> 416
+      - start >= file_size          -> 416
+      - empty / non-"bytes=" prefix -> serve full file
+      - zero-byte file              -> any range request -> 416 (no satisfiable bytes)
+    """
+    if not range_header:
+        return ("full", None)
+    s = range_header.strip().lower()
+    if not s.startswith("bytes="):
+        return ("full", None)
+    spec = s[len("bytes="):].strip()
+    if not spec:
+        return ("full", None)
+    # Multipart ranges (comma-separated) are not supported here.
+    if "," in spec:
+        return ("invalid", None)
+    if "-" not in spec:
+        return ("invalid", None)
+    lhs, rhs = spec.split("-", 1)
+    lhs, rhs = lhs.strip(), rhs.strip()
+
+    # Zero-byte file: nothing satisfiable.
+    if file_size <= 0:
+        return ("invalid", None)
+
+    try:
+        if lhs == "" and rhs == "":
+            # "bytes=-" — malformed.
+            return ("invalid", None)
+        if lhs == "":
+            # Suffix range: last N bytes.
+            n = int(rhs)
+            if n <= 0:
+                return ("invalid", None)
+            start = max(0, file_size - n)
+            end = file_size - 1
+        elif rhs == "":
+            # Open-ended: start to EOF.
+            start = int(lhs)
+            end = file_size - 1
+        else:
+            start = int(lhs)
+            end = int(rhs)
+            # Clamp end to last byte if client over-asked.
+            if end >= file_size:
+                end = file_size - 1
+    except ValueError:
+        return ("invalid", None)
+
+    if start < 0 or start >= file_size or end < start:
+        return ("invalid", None)
+    return ("ok", (start, end))
+
+
 def range_requests_response(request: Request, file_path: str, content_type: str):
     file_size = os.stat(file_path).st_size
     range_header = request.headers.get("range")
@@ -146,23 +215,19 @@ def range_requests_response(request: Request, file_path: str, content_type: str)
         "access-control-allow-origin": "*",
     }
 
-    if not range_header:
+    status, parsed = _parse_range_header(range_header or "", file_size)
+
+    if status == "full":
         def stream_file():
             with open(file_path, "rb") as f:
                 while chunk := f.read(1024 * 1024):
                     yield chunk
         return StreamingResponse(stream_file(), headers=headers)
 
-    start, end = 0, file_size - 1
-    range_str = range_header.replace("bytes=", "").split("-")
-    if range_str[0]:
-        start = int(range_str[0])
-    if len(range_str) > 1 and range_str[1]:
-        end = int(range_str[1])
-
-    if start >= file_size or end >= file_size:
+    if status == "invalid":
         return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}"})
 
+    start, end = parsed  # type: ignore[misc]
     chunk_length = end - start + 1
     headers["content-length"] = str(chunk_length)
     headers["content-range"] = f"bytes {start}-{end}/{file_size}"
@@ -376,6 +441,8 @@ def hls_segment(video_id: str, idx: int, path: Optional[str] = None):
         raise HTTPException(status_code=400, detail="Segment index must be >= 0")
     try:
         seg_path = hls_stream.get_or_build_segment(resolved, idx)
+    except IndexError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Segment build failed: {exc}")
     return FileResponse(
@@ -514,19 +581,61 @@ class ReindexFolderRequest(BaseModel):
 
 
 def _reindex_all_wrapper() -> None:
+    """Transactional reindex.
+
+    Strategy: rename the live table to a timestamped backup, create a fresh
+    empty live table, and run ingestion into it. On ANY exception, drop the
+    partial live table and rename the backup back. On success, drop the
+    backup. This guarantees that a mid-run crash never destroys user data.
+    """
     global tasks_in_progress
+    import time as _time
+
     with _tasks_lock:
         tasks_in_progress += 1
+
+    backup_name = f"media_backup_{int(_time.time())}"
+    backup_created = False
     try:
+        # 1. Snapshot folders + validate reachability (warn but continue).
         folders = get_folders()
-        removed = core.purge_all()
-        print(f"[reindex_all] Purged {removed} rows from LanceDB.")
-        ingestion.clear_progress_file()
+        reachable: List[str] = []
         for folder in folders:
-            if os.path.exists(folder):
-                ingestion.process_folder(folder)
+            if os.path.isdir(folder):
+                reachable.append(folder)
+            else:
+                print(f"[reindex_all] WARNING: folder unreachable, skipping: {folder}")
+
+        # 2. Backup live table -> fresh empty table.
+        removed = core.backup_and_reset_table(backup_name)
+        backup_created = True
+        print(f"[reindex_all] Backed up {removed} rows to {backup_name!r}; live table reset.")
+
+        # Progress file references the OLD table state; clear so we don't
+        # falsely skip files that need re-encoding.
+        ingestion.clear_progress_file()
+
+        # 3. Re-ingest into the now-empty live table.
+        for folder in reachable:
+            ingestion.process_folder(folder)
+
+        # 4. Success — drop the backup.
+        core.drop_backup(backup_name)
+        backup_created = False
+        print(f"[reindex_all] Reindex complete; dropped backup {backup_name!r}.")
+
     except Exception as exc:
-        print(f"[reindex_all] Error: {exc}")
+        print(f"[reindex_all] Error: {exc!r} — attempting rollback.")
+        if backup_created:
+            try:
+                core.restore_from_backup(backup_name)
+                print(f"[reindex_all] Restored from backup {backup_name!r}.")
+            except Exception as restore_exc:
+                # Leave backup table in place for manual recovery.
+                print(
+                    f"[reindex_all] CRITICAL: restore from {backup_name!r} failed: {restore_exc!r}. "
+                    f"Backup table is preserved for manual recovery."
+                )
     finally:
         with _tasks_lock:
             tasks_in_progress -= 1
@@ -665,11 +774,23 @@ class SetLevelRequest(BaseModel):
 
 @app.get("/config")
 def get_config_endpoint():
-    """Return current analysis level, its params, and available levels."""
+    """Return current analysis level, its params, and available levels.
+
+    Also surfaces `model_fallback` + `effective_model` so the Settings UI can
+    show an honest banner when the level's requested model can't run in the
+    current build (e.g. Low requests CLIP-B-32 but the fixed 768d schema
+    forces a fallback to CLIP-L-14).
+    """
+    params = config.get_current_level_params()
+    requested = params.get("model", "clip-ViT-L-14")
+    effective = core.resolve_model_name(requested)
     return {
         "level": config.get_config()["level"],
-        "level_data": config.get_current_level_params(),
+        "level_data": params,
         "available_levels": config.list_levels(),
+        "configured_model": requested,
+        "effective_model": effective,
+        "model_fallback": requested != effective,
     }
 
 @app.put("/config/level")
@@ -747,13 +868,28 @@ def _add_files_wrapper(filepaths: List[str]) -> None:
     with _tasks_lock:
         tasks_in_progress += 1
     try:
+        existing_paths = core.get_existing_paths()
         for fp in filepaths:
             ext = os.path.splitext(fp)[1].lower()
+            norm_fp = platform_utils.normalize_path(fp)
+            if norm_fp in existing_paths:
+                # Already indexed — skip silently (mirrors process_folder dedup).
+                continue
             try:
                 if ext in {".mp4", ".mov", ".mkv", ".webm", ".avi"}:
-                    ingestion.process_video(fp, str(uuid.uuid4()))
+                    video_id = str(uuid.uuid4())
+                    recs = ingestion.process_video(fp, video_id)
+                    if recs:
+                        # Persist frame rows BEFORE audio ingest so audio
+                        # segments are never orphaned on a mid-flight crash.
+                        core.add_media(recs)
+                        ingestion.ingest_video_audio_if_enabled(norm_fp, video_id)
+                        existing_paths.add(norm_fp)
                 else:
-                    ingestion.process_image(fp)
+                    rec = ingestion.process_image(fp)
+                    if rec:
+                        core.add_media([rec])
+                        existing_paths.add(norm_fp)
             except Exception as e:
                 print(f"[/add_files] failed {fp}: {e}")
     finally:

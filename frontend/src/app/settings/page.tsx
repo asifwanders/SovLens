@@ -152,8 +152,9 @@ export default function SettingsPage() {
     queueMicrotask(() => { void fetchConfig(); });
     queueMicrotask(() => { void fetchModelStatus(); });
     getVersion().then(setAppVersion).catch(() => setAppVersion("unknown"));
-    // Auto-check silently on mount
-    void checkForUpdates(true);
+    // Auto-check silently on mount — defer past render commit so the
+    // setUpdateChecking(true) inside doesn't trip react-hooks/set-state-in-effect.
+    queueMicrotask(() => { void checkForUpdates(true); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

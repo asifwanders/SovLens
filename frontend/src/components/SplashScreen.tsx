@@ -20,11 +20,14 @@ export default function SplashScreen({ onComplete }: { onComplete: () => void })
   const [mounted, setMounted] = useState(false);
   const [status, setStatus] = useState<"booting" | "downloading" | "ready" | "error">("booting");
   const [statusMsg, setStatusMsg] = useState<string>("Starting backend…");
-  const mountedAt = useRef<number>(Date.now());
+  // Lazy-init in effect to keep render pure (Date.now() is impure).
+  const mountedAt = useRef<number>(0);
   const warmupFired = useRef(false);
 
   useEffect(() => {
-    setMounted(true);
+    mountedAt.current = Date.now();
+    // Defer past render commit to satisfy react-hooks/set-state-in-effect.
+    queueMicrotask(() => setMounted(true));
     let cancelled = false;
 
     const dismiss = () => {

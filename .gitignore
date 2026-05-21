@@ -38,7 +38,10 @@ Cargo.lock.bak
 
 # ─── SovLens runtime data ──────────────────────────────
 # LanceDB index, model caches, transcoded media — never commit
+# (lancedb_data is legacy; new installs use <app_data>/lancedb which lives
+# outside the repo — kept here for older clones that still have it locally.)
 backend/lancedb_data/
+backend/lancedb/
 backend/temp_frames/
 backend/.EasyOCR/
 
@@ -63,3 +66,4 @@ frontend/src-tauri/binaries/sovlens-backend-*
 *.key
 tauri-updater-private.key
 secrets/
+backend/yolov8n.pt

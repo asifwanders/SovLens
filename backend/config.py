@@ -19,7 +19,12 @@ CONFIG_PATH = os.path.join(platform_utils.get_app_data_dir(), "config.json")
 LEVELS: Dict[str, Dict[str, Any]] = {
     "low": {
         "label": "Low",
-        "description": "Fast indexing. Best for casual photo libraries.",
+        # NOTE: requests clip-ViT-B-32 (512d) but the current LanceDB schema is
+        # fixed at 768d, so core._resolve_model_name() falls back to
+        # clip-ViT-L-14. /config exposes this fallback so the UI can show a
+        # banner ("Low currently uses CLIP-L-14; B-32 support requires a
+        # schema migration"). Honest disclosure beats silent coercion.
+        "description": "Fast indexing. Best for casual photo libraries. (Uses CLIP-L-14 in current build — B-32 not yet supported.)",
         "frame_sample_interval_s": 10.0,
         "max_frames_per_scene": 5,
         "min_scene_for_sampling_s": 8.0,

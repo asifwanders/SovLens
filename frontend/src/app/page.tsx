@@ -175,22 +175,47 @@ export default function Home() {
               return;
             }
 
-            await Promise.allSettled(
-              newPaths.map((p) =>
-                fetch(`${API}/add_file`, {
+            // Per-path fetch + ok check. allSettled only reflects whether the
+            // request itself rejected — a 4xx/5xx still resolves, so we must
+            // inspect res.ok inside the map to know real backend success.
+            const results = await Promise.allSettled(
+              newPaths.map(async (p) => {
+                const res = await fetch(`${API}/add_file`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({ filepath: p }),
-                })
-              )
+                });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                return p;
+              })
             );
 
-            newPaths.forEach((p) => known.add(p));
+            const succeeded: string[] = [];
+            let failed = 0;
+            results.forEach((r) => {
+              if (r.status === "fulfilled") {
+                succeeded.push(r.value);
+              } else {
+                failed++;
+              }
+            });
 
-            const msg =
-              skipped > 0
-                ? `Added ${newPaths.length} file${newPaths.length !== 1 ? "s" : ""}, skipped ${skipped} duplicate${skipped !== 1 ? "s" : ""}.`
-                : `Added ${newPaths.length} file${newPaths.length !== 1 ? "s" : ""}.`;
+            // Only mark genuinely-added paths as known so retries are possible.
+            succeeded.forEach((p) => known.add(p));
+
+            const addedPart = `Added ${succeeded.length} file${succeeded.length !== 1 ? "s" : ""}`;
+            let msg: string;
+            if (failed > 0) {
+              msg = `${addedPart}, failed ${failed} (check Settings → Logs)`;
+              if (skipped > 0) {
+                msg += `, skipped ${skipped} duplicate${skipped !== 1 ? "s" : ""}`;
+              }
+              msg += ".";
+            } else if (skipped > 0) {
+              msg = `${addedPart}, skipped ${skipped} duplicate${skipped !== 1 ? "s" : ""}.`;
+            } else {
+              msg = `${addedPart}.`;
+            }
             showStatus(msg);
 
             setOffset(0);

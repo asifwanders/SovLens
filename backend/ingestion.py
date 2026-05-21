@@ -586,20 +586,34 @@ def process_video(filepath: str, video_id: Optional[str] = None) -> List[Dict]:
     elif params.get("yolo_enabled") and not yolo_detect.YOLO_AVAILABLE:
         print("[ingestion] yolo_enabled=True but ultralytics not installed — skipping YOLO pass.")
 
-    # -----------------------------------------------------------------------
-    # Auto audio ingest (High / Extreme levels)
-    # -----------------------------------------------------------------------
-    if params.get("audio_enabled"):
-        if audio_ingest.WHISPER_AVAILABLE:
-            try:
-                whisper_model = params.get("whisper_model", "base")
-                audio_ingest.process_video_audio(filepath, video_id, model_name=whisper_model)
-            except Exception as exc:
-                print(f"[ingestion] Auto audio ingest error for {filepath}: {exc}")
-        else:
-            print("[ingestion] audio_enabled=True but openai-whisper not installed — skipping audio ingest.")
-
+    # NOTE: Audio ingest used to run here, but audio_ingest.process_video_audio
+    # inserts audio_segment rows directly into LanceDB. If it ran before the
+    # caller persisted the frame records returned below, a crash between the
+    # audio insert and the frame insert would leave orphan audio rows pointing
+    # at a video_id that has no frames. Audio ingest is now triggered by the
+    # caller via `ingest_video_audio_if_enabled` AFTER frame records are
+    # persisted to LanceDB.
     return records
+
+
+def ingest_video_audio_if_enabled(filepath: str, video_id: str) -> None:
+    """Run audio ingest for a video iff the current level enables it.
+
+    Must be called only AFTER the video's frame records have been persisted
+    to LanceDB. This ordering guarantees that audio_segment rows are never
+    orphans (no frame rows means no video_id to anchor them to).
+    """
+    params = _get_ingest_params()
+    if not params.get("audio_enabled"):
+        return
+    if not audio_ingest.WHISPER_AVAILABLE:
+        print("[ingestion] audio_enabled=True but openai-whisper not installed — skipping audio ingest.")
+        return
+    try:
+        whisper_model = params.get("whisper_model", "base")
+        audio_ingest.process_video_audio(filepath, video_id, model_name=whisper_model)
+    except Exception as exc:
+        print(f"[ingestion] Auto audio ingest error for {filepath}: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -688,6 +702,9 @@ def process_folder(folder_path: str) -> None:
             if recs:
                 records.extend(recs)
                 _flush()
+                # Audio ingest MUST run after frames are persisted so audio
+                # segment rows never become orphans on a mid-video crash.
+                ingest_video_audio_if_enabled(f, video_id)
                 progress[f] = {
                     "status": "done",
                     "video_id": video_id,

@@ -26,6 +26,10 @@ device = platform_utils.detect_torch_device()
 # LanceDB schema fixes the vector column to list_(float32, 768).
 # ViT-B-32 outputs 512d and is REJECTED — see _resolve_model_name().
 _SUPPORTED_768D = {"clip-ViT-L-14"}
+# The single model that has ever been used to populate the DB. All historical
+# rows are assumed to have been encoded with this model when backfilling the
+# `model_name` column during migration.
+LEGACY_MODEL_NAME = "clip-ViT-L-14"
 
 _model: Optional[SentenceTransformer] = None
 _model_name: Optional[str] = None
@@ -35,16 +39,22 @@ _model_lock = threading.Lock()
 def _resolve_model_name(requested: str) -> str:
     """Map a config model name to a supported 768d model.
 
-    Falls back to clip-ViT-L-14 with a warning if the requested model does not
-    produce 768-dimensional vectors (e.g. clip-ViT-B-32 outputs 512d).
+    Returns (effective_name, did_fall_back).
+
+    The current LanceDB schema fixes the vector column at 768d, so only
+    `clip-ViT-L-14` is honoured. A request for any other model (e.g.
+    `clip-ViT-B-32` which is 512d) falls back to L-14 and the caller can
+    surface that fact to the UI. The fallback is NO LONGER silent: the
+    `/status` and `/config` endpoints expose `model_fallback` so the
+    Settings UI can show an honest banner.
     """
     if requested in _SUPPORTED_768D:
         return requested
     print(
         f"WARN: model '{requested}' not 768d-compatible with current schema; "
-        "using clip-ViT-L-14 instead. Re-index required if model is changed."
+        f"using {LEGACY_MODEL_NAME} instead. Re-index required if model is changed."
     )
-    return "clip-ViT-L-14"
+    return LEGACY_MODEL_NAME
 
 
 def get_model() -> SentenceTransformer:
@@ -86,8 +96,50 @@ def reset_model() -> None:
         _model = None
         _model_name = None
 
-# Set up LanceDB in the backend directory
-DB_PATH = os.path.join(os.path.dirname(__file__), "lancedb_data")
+# ---------------------------------------------------------------------------
+# LanceDB storage location
+# ---------------------------------------------------------------------------
+# The DB MUST live under the per-user app data directory, NOT inside the
+# package/source tree. Storing it next to backend/*.py breaks packaged installs
+# (read-only Resources dir on mac, app translocation, multi-user installs,
+# upgrades that wipe the bundle). The old location was
+# `<backend>/lancedb_data`; we now use `<app_data>/lancedb` and one-shot
+# migrate the legacy directory if it exists.
+_LEGACY_DB_PATH = os.path.join(os.path.dirname(__file__), "lancedb_data")
+DB_PATH = os.path.join(platform_utils.get_app_data_dir(), "lancedb")
+
+
+def _migrate_legacy_db_dir() -> None:
+    """One-shot move of <backend>/lancedb_data -> <app_data>/lancedb.
+
+    Paranoid: only runs when the legacy dir exists AND the new dir does not
+    (or is empty). Uses copy + leaves the old dir in place so a botched move
+    can't lose data. Failure is logged but never fatal.
+    """
+    try:
+        if not os.path.isdir(_LEGACY_DB_PATH):
+            return
+        # Skip if new location already has any content (already-migrated user).
+        if os.path.isdir(DB_PATH) and os.listdir(DB_PATH):
+            return
+        os.makedirs(DB_PATH, exist_ok=True)
+        import shutil
+        for name in os.listdir(_LEGACY_DB_PATH):
+            src = os.path.join(_LEGACY_DB_PATH, name)
+            dst = os.path.join(DB_PATH, name)
+            if os.path.exists(dst):
+                continue
+            if os.path.isdir(src):
+                shutil.copytree(src, dst)
+            else:
+                shutil.copy2(src, dst)
+        print(f"[core] Migrated legacy LanceDB dir: {_LEGACY_DB_PATH} -> {DB_PATH} (old dir left intact).")
+    except Exception as e:
+        print(f"[core] Legacy LanceDB migration failed (continuing): {e}")
+
+
+os.makedirs(DB_PATH, exist_ok=True)
+_migrate_legacy_db_dir()
 db = lancedb.connect(DB_PATH)
 
 # Define schema for our media table
@@ -102,6 +154,7 @@ schema = pa.schema([
     pa.field("is_primary", pa.bool_()),       # Only true for first frame of a video, or images
     pa.field("video_id", pa.string()),        # UUID shared across all frames of the same video; "" for images
     pa.field("text_snippet", pa.string()),    # transcript text for audio_segment rows; "" for others
+    pa.field("model_name", pa.string()),      # CLIP model used to encode this vector (e.g. "clip-ViT-L-14")
 ])
 
 TABLE_NAME = "media"
@@ -137,6 +190,15 @@ def _open_or_create_table():
         print("WARNING: 'text_snippet' column missing — auto-migrating schema (v3).")
         table = tbl
         migrate_schema_v3()
+        tbl = table
+        existing_fields = {f.name for f in tbl.schema}
+
+    # v4: add model_name (backfilled to LEGACY_MODEL_NAME for all old rows;
+    # those rows were only ever encoded with clip-ViT-L-14).
+    if "model_name" not in existing_fields:
+        print("WARNING: 'model_name' column missing — auto-migrating schema (v4).")
+        table = tbl
+        migrate_schema_v4()
         tbl = table
 
     return tbl
@@ -184,16 +246,66 @@ def migrate_schema_v3() -> None:
         print("Schema v3 already up-to-date; no migration needed.")
         return
 
+    # Use a v3-only intermediate schema so model_name (added in v4) is not
+    # required at this stage — v4 migration will add it next.
+    schema_v3 = pa.schema([
+        pa.field("vector", pa.list_(pa.float32(), 768)),
+        pa.field("id", pa.string()),
+        pa.field("path", pa.string()),
+        pa.field("thumbnail", pa.string()),
+        pa.field("type", pa.string()),
+        pa.field("timestamp", pa.float64()),
+        pa.field("is_primary", pa.bool_()),
+        pa.field("video_id", pa.string()),
+        pa.field("text_snippet", pa.string()),
+    ])
     # WARN: loads entire table into RAM; fine for <1M rows on local hardware
     rows = table.search().limit(10_000_000).to_list()
     for r in rows:
         r.setdefault("text_snippet", "")
+        r.pop("model_name", None)
+
+    db.drop_table(TABLE_NAME)
+    table = db.create_table(TABLE_NAME, schema=schema_v3)
+    if rows:
+        table.add(rows)
+    print(f"Migration v3 complete: {len(rows)} rows backfilled with empty text_snippet.")
+
+
+def migrate_schema_v4() -> None:
+    """v4 migration: add `model_name` column to record which CLIP model encoded each row.
+
+    Backfills LEGACY_MODEL_NAME ("clip-ViT-L-14") for every existing row — the
+    only model that was ever used to populate the DB before this column existed.
+
+    Safety: drop-and-recreate (LanceDB 0.14 lacks add-column DDL). Rows are
+    loaded into RAM, then the table is dropped and recreated under the new
+    schema. If the user has < ~1M rows (~few GB) this is fine on local
+    hardware. The reindex_all transactional helpers (backup_and_reset_table /
+    restore_from_backup) are NOT used here because this is an
+    open-time migration, not a user-initiated reindex — failing partway
+    through would leave the DB in a known state (legacy dir still present
+    via _migrate_legacy_db_dir, since we never delete it).
+    """
+    global table
+    existing_fields = {f.name for f in table.schema}
+    if "model_name" in existing_fields:
+        print("Schema v4 already up-to-date; no migration needed.")
+        return
+
+    # WARN: loads entire table into RAM; fine for <1M rows on local hardware
+    rows = table.search().limit(10_000_000).to_list()
+    for r in rows:
+        r.setdefault("model_name", LEGACY_MODEL_NAME)
 
     db.drop_table(TABLE_NAME)
     table = db.create_table(TABLE_NAME, schema=schema)
     if rows:
         table.add(rows)
-    print(f"Migration v3 complete: {len(rows)} rows backfilled with empty text_snippet.")
+    print(
+        f"Migration v4 complete: {len(rows)} rows backfilled with "
+        f"model_name={LEGACY_MODEL_NAME!r}."
+    )
 
 
 table = _open_or_create_table()
@@ -298,12 +410,29 @@ def encode_texts_batch(texts: List[str]) -> List[List[float]]:
 # DB helpers
 # ---------------------------------------------------------------------------
 
+def get_effective_model_name() -> str:
+    """Return the model name that core.get_model() WILL load for the active config.
+
+    Distinct from get_model_name() which returns the model currently in RAM
+    (may be 'unloaded' until first encode call). Used to stamp `model_name`
+    on freshly added rows and as the search-time filter so vectors encoded
+    by a different model are never mixed in.
+    """
+    cfg = config.get_current_level_params()
+    return _resolve_model_name(cfg.get("model", LEGACY_MODEL_NAME))
+
+
 def add_media(records: List[Dict[str, Any]]) -> None:
     """Insert a batch of media records into LanceDB."""
     # Ensure schema columns always present so inserts never fail on missing keys
+    effective = get_effective_model_name()
     for r in records:
         r.setdefault("video_id", "")
         r.setdefault("text_snippet", "")
+        # Always stamp the model that produced the vector. Callers may pass an
+        # explicit model_name (e.g. if they encoded with a specific model
+        # outside the cached global), otherwise default to current effective.
+        r.setdefault("model_name", effective)
     table.add(records)
 
 
@@ -426,9 +555,16 @@ def search_media(
     # Over-fetch so each video has candidate frames before collapsing
     fetch_limit = min(limit * 5, 200)
 
+    # Filter to rows encoded with the CURRENT effective model. Mixing vectors
+    # from different models (different vector spaces, possibly different
+    # dimensions in the future) is a data-corruption footgun for relevance.
+    # Legacy rows were backfilled to LEGACY_MODEL_NAME during migration v4.
+    effective_model = get_effective_model_name()
+    safe_model = effective_model.replace("'", "''")
     raw = (
         table.search(query_vector)
         .metric("cosine")
+        .where(f"model_name = '{safe_model}'")
         .limit(fetch_limit)
         .to_list()
     )
@@ -467,6 +603,50 @@ def purge_all() -> int:
             db.drop_table(TABLE_NAME)
         table = db.create_table(TABLE_NAME, schema=schema)
         return count
+
+
+def backup_and_reset_table(backup_name: str) -> int:
+    """Rename the live media table to `backup_name`, then create a fresh empty
+    media table with the same schema. Used by transactional reindex.
+
+    Returns the row count of the table that was renamed (0 if there was none).
+    Raises if `backup_name` already exists so we never silently clobber a prior
+    backup that recovery still needs.
+    """
+    global table
+    with _model_lock:
+        if backup_name in db.table_names():
+            raise RuntimeError(f"Backup table {backup_name!r} already exists; refusing to overwrite.")
+        count = 0
+        if TABLE_NAME in db.table_names():
+            try:
+                count = table.count_rows() if table is not None else 0
+            except Exception:
+                count = 0
+            db.rename_table(TABLE_NAME, backup_name)
+        table = db.create_table(TABLE_NAME, schema=schema)
+        return count
+
+
+def restore_from_backup(backup_name: str) -> None:
+    """Drop the (likely-partial) live media table and rename `backup_name`
+    back to it. Used by reindex recovery on failure.
+    """
+    global table
+    with _model_lock:
+        if backup_name not in db.table_names():
+            raise RuntimeError(f"Backup table {backup_name!r} not found; cannot restore.")
+        if TABLE_NAME in db.table_names():
+            db.drop_table(TABLE_NAME)
+        db.rename_table(backup_name, TABLE_NAME)
+        table = db.open_table(TABLE_NAME)
+
+
+def drop_backup(backup_name: str) -> None:
+    """Drop a reindex backup table after a successful reindex."""
+    with _model_lock:
+        if backup_name in db.table_names():
+            db.drop_table(backup_name)
 
 
 def delete_rows_under_folder(folder_path: str) -> int:
