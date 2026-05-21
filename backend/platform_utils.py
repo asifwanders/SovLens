@@ -183,6 +183,42 @@ def webview_plays_hevc() -> bool:
 # ---------------------------------------------------------------------------
 
 _FFMPEG_EXE: Optional[str] = None
+_FFMPEG_PATH_INJECTED = False
+
+
+def ensure_ffmpeg_on_path() -> None:
+    """Whisper's `load_audio` hardcodes `cmd=["ffmpeg", ...]` and ignores any
+    explicit path. In a PyInstaller frozen exe there is no ffmpeg on PATH, so
+    every `whisper.transcribe()` call raises `[WinError 2] file not found`.
+
+    Fix: copy the imageio_ffmpeg binary to a stable dir named exactly
+    `ffmpeg.exe` (Win) / `ffmpeg` (mac/linux), prepend that dir to PATH.
+    Idempotent.
+    """
+    global _FFMPEG_PATH_INJECTED
+    if _FFMPEG_PATH_INJECTED:
+        return
+    try:
+        import shutil
+        src = get_ffmpeg_exe()
+        target_name = "ffmpeg.exe" if IS_WINDOWS else "ffmpeg"
+        src_name = os.path.basename(src)
+        if src_name == target_name:
+            d = os.path.dirname(src)
+        else:
+            d = os.path.join(get_temp_dir(), "sovlens_ffmpeg")
+            os.makedirs(d, exist_ok=True)
+            dst = os.path.join(d, target_name)
+            if not os.path.exists(dst):
+                shutil.copy2(src, dst)
+                if not IS_WINDOWS:
+                    os.chmod(dst, 0o755)
+        os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+        _FFMPEG_PATH_INJECTED = True
+    except Exception:
+        # Best-effort. If it fails, the WinError 2 will still surface upstream
+        # and the caller can fall back to alternative paths.
+        pass
 
 
 def get_ffmpeg_exe() -> str:

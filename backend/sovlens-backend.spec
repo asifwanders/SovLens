@@ -24,6 +24,7 @@ eo_datas, eo_binaries, eo_hidden = collect_all("easyocr")
 wh_datas, wh_binaries, wh_hidden = collect_all("whisper")
 ld_datas, ld_binaries, ld_hidden = collect_all("lancedb")
 sd_datas, sd_binaries, sd_hidden = collect_all("scenedetect")
+ff_datas, ff_binaries, ff_hidden = collect_all("imageio_ffmpeg")
 
 # ------------------------------------------------------------------
 # Hidden imports — libraries that PyInstaller can't auto-detect
@@ -92,7 +93,7 @@ HIDDEN_IMPORTS = [
     "shelve",
     "email.mime.multipart",
     "email.mime.text",
-] + torch_hidden + tv_hidden + tr_hidden + st_hidden + ul_hidden + eo_hidden + wh_hidden + ld_hidden + sd_hidden
+] + torch_hidden + tv_hidden + tr_hidden + st_hidden + ul_hidden + eo_hidden + wh_hidden + ld_hidden + sd_hidden + ff_hidden
 
 a = Analysis(
     # Entry point — relative to spec file location (backend/).
@@ -101,10 +102,12 @@ a = Analysis(
     binaries=(
         torch_binaries + tv_binaries + tr_binaries + st_binaries
         + ul_binaries + eo_binaries + wh_binaries + ld_binaries + sd_binaries
+        + ff_binaries
     ),
     datas=(
         torch_datas + tv_datas + tr_datas + st_datas
         + ul_datas + eo_datas + wh_datas + ld_datas + sd_datas
+        + ff_datas
     ),
     hiddenimports=HIDDEN_IMPORTS,
     hookspath=[],

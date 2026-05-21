@@ -15,6 +15,10 @@ import audio_ingest
 import yolo_detect
 import ocr_detect
 import platform_utils
+# Whisper subprocess-invokes bare "ffmpeg". In the PyInstaller frozen exe
+# there is no system ffmpeg, so without this PATH injection every audio
+# ingest raises [WinError 2]. Must run before whisper.transcribe() ever.
+platform_utils.ensure_ffmpeg_on_path()
 import hls_stream
 import json
 import mimetypes
