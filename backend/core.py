@@ -179,11 +179,18 @@ def _ensure_sessions() -> Tuple[Any, Any, Any]:
 
         # Pull the ONNX bundle from HF Hub on first use; cached for subsequent
         # launches in ~/.cache/huggingface.
+        #
+        # IMPORTANT: enumerate the EXACT filenames we want. The repo ships
+        # 8 quantization variants per submodel (fp32, fp16, bnb4, int8, q4,
+        # q4f16, quantized, uint8) — a glob like "vision_model*.onnx" pulls
+        # ALL of them (~3.7 GB total) when we only need one pair (~820 MB).
+        # fp16 is the best speed/quality tradeoff on CoreML / CUDA / DML;
+        # on CPU EP the cast is essentially free at ORT graph-opt time.
         local_dir = snapshot_download(
             repo_id=_HF_ONNX_REPO_ID,
             allow_patterns=[
-                "onnx/vision_model*.onnx",
-                "onnx/text_model*.onnx",
+                "onnx/vision_model_fp16.onnx",
+                "onnx/text_model_fp16.onnx",
                 "tokenizer.json",
                 "tokenizer_config.json",
                 "preprocessor_config.json",

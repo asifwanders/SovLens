@@ -1113,22 +1113,25 @@ def _hf_file_cached(repo_id: str, filename: str, min_bytes: int = 1) -> bool:
 
 
 def _clip_downloaded() -> bool:
-    """CLIP is "downloaded" when tokenizer + at least one vision/text ONNX
-    pair is on disk. We accept fp16 OR fp32 variants — _pick_onnx_files
-    will choose at load time."""
+    """CLIP is "downloaded" when tokenizer + the fp16 ONNX pair is on disk.
+
+    core.py's snapshot_download only pulls fp16 (see allow_patterns there),
+    so checking for the fp16 pair specifically is correct. We keep an
+    fp32 fallback for users mid-upgrade who already have the larger
+    vision_model.onnx cached from an older build — those installs report
+    downloaded=true and skip the redundant fp16 fetch.
+    """
     tok = _hf_file_cached(_HF_CLIP_REPO_ID, "tokenizer.json", min_bytes=10_000)
     if not tok:
         return False
-    candidates = [
-        ("onnx/vision_model_fp16.onnx", "onnx/text_model_fp16.onnx"),
-        ("onnx/vision_model.onnx",      "onnx/text_model.onnx"),
-    ]
-    # ONNX files for CLIP-L-14 are ~200-600 MB; require >= 100 MB to rule
-    # out partial downloads that the filesystem walk would accept.
-    for v, t in candidates:
-        if _hf_file_cached(_HF_CLIP_REPO_ID, v, min_bytes=100 * 1024 * 1024) and \
-           _hf_file_cached(_HF_CLIP_REPO_ID, t, min_bytes=10 * 1024 * 1024):
-            return True
+    # fp16 (current build): vision ~580 MB, text ~236 MB.
+    if _hf_file_cached(_HF_CLIP_REPO_ID, "onnx/vision_model_fp16.onnx", min_bytes=400 * 1024 * 1024) and \
+       _hf_file_cached(_HF_CLIP_REPO_ID, "onnx/text_model_fp16.onnx", min_bytes=150 * 1024 * 1024):
+        return True
+    # fp32 fallback for legacy caches.
+    if _hf_file_cached(_HF_CLIP_REPO_ID, "onnx/vision_model.onnx", min_bytes=800 * 1024 * 1024) and \
+       _hf_file_cached(_HF_CLIP_REPO_ID, "onnx/text_model.onnx", min_bytes=300 * 1024 * 1024):
+        return True
     return False
 
 
@@ -1243,7 +1246,11 @@ def models_status():
 # expected total gives a reasonable bar (final 5-10% sometimes lingers as
 # the `.incomplete` file finalises).
 _EXPECTED_BYTES = {
-    "clip": 900 * 1024 * 1024,
+    # CLIP-L-14 fp16 (vision + text + tokenizer + configs). Pinned to the
+    # exact files allow_patterns in core.py pulls — if you ever expand to
+    # also ship fp32 / quantized variants, bump this so the splash bar
+    # doesn't exceed 100%.
+    "clip": 830 * 1024 * 1024,
     "whisper_base": 150 * 1024 * 1024,
     "whisper_small": 500 * 1024 * 1024,
     "whisper_medium": 1500 * 1024 * 1024,
