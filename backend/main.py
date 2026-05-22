@@ -57,6 +57,69 @@ logging.basicConfig(level=logging.INFO, handlers=[_handler, logging.StreamHandle
 tasks_in_progress = 0
 _tasks_lock = threading.Lock()
 
+# ---------------------------------------------------------------------------
+# Job tracking
+# ---------------------------------------------------------------------------
+# Per-operation progress for reindex / add_files / sync. The legacy
+# `tasks_in_progress` counter still drives the home page busy banner; the
+# `_active_jobs` dict adds granular (done, total, current) per running job
+# so the UI can render real progress bars.
+#
+# _media_generation increments on every successful add / delete so the home
+# page knows when to refetch /media without waiting for an ingest-end edge.
+# ---------------------------------------------------------------------------
+import time as _time
+_active_jobs: dict = {}
+_media_generation: int = 0
+
+
+def _start_job(job_type: str, total: int = 0, description: str = "") -> str:
+    """Register a new background job. Returns a short opaque id."""
+    global tasks_in_progress
+    job_id = uuid.uuid4().hex[:12]
+    with _tasks_lock:
+        _active_jobs[job_id] = {
+            "id": job_id,
+            "type": job_type,
+            "description": description,
+            "total": int(total),
+            "done": 0,
+            "current": "",
+            "started_at": _time.time(),
+        }
+        tasks_in_progress += 1
+    return job_id
+
+
+def _update_job(job_id: str, **kwargs) -> None:
+    """Merge state into an active job. No-op if job already finished."""
+    with _tasks_lock:
+        job = _active_jobs.get(job_id)
+        if job is not None:
+            job.update(kwargs)
+
+
+def _finish_job(job_id: str) -> None:
+    """Remove a job from the active set + decrement the legacy counter.
+
+    Idempotent: a double-finish (defensive `finally` + accidental call) is
+    a no-op, so the counter never under-counts.
+    """
+    global tasks_in_progress
+    with _tasks_lock:
+        if _active_jobs.pop(job_id, None) is None:
+            return
+        tasks_in_progress -= 1
+        if tasks_in_progress < 0:
+            tasks_in_progress = 0
+
+
+def _bump_media_generation() -> None:
+    """Signal to /status pollers that the media table has new content."""
+    global _media_generation
+    with _tasks_lock:
+        _media_generation += 1
+
 FOLDERS_FILE = os.path.join(platform_utils.get_app_data_dir(), "folders.json")
 
 def get_folders():
@@ -72,13 +135,35 @@ def save_folders(folders):
 
 app = FastAPI(title="SovLens AI Engine", description="Local AI semantic media search backend")
 
-# Allow CORS so the Tauri frontend can communicate with FastAPI
+# Allow CORS so the Tauri frontend can communicate with FastAPI.
+#
+# Origins:
+#   - tauri://localhost            mac WKWebView
+#   - http://tauri.localhost       Win WebView2 (since Tauri 2)
+#   - https://tauri.localhost      Win WebView2 (https variant)
+#   - http://localhost:3000        Next.js dev server
+#   - http://127.0.0.1:3000        same, IPv4-explicit variant some browsers use
+#
+# allow_credentials=False: we don't use cookies/Authorization headers — the
+# backend binds to 127.0.0.1 only, so the network layer is the auth. Setting
+# allow_credentials=True with a wildcard origin is a CORS spec violation
+# anyway (browser silently drops the Access-Control-Allow-Origin header).
+#
+# allow_methods/headers: explicit lists keep the preflight responses small
+# and let a future audit see exactly what's exposed at a glance.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[
+        "tauri://localhost",
+        "http://tauri.localhost",
+        "https://tauri.localhost",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Range"],
+    expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
 )
 
 class SearchQuery(BaseModel):
@@ -114,9 +199,16 @@ def get_status():
     cfg_params = config.get_current_level_params()
     requested = cfg_params.get("model", "clip-ViT-L-14")
     effective = core.resolve_model_name(requested)
+    with _tasks_lock:
+        # Deep-copy under the lock so FastAPI can serialize without a torn
+        # read while another thread mutates a job's `done`/`current`.
+        jobs_snapshot = [dict(v) for v in _active_jobs.values()]
+        media_gen = _media_generation
     return {
         "is_ingesting": tasks_in_progress > 0,
         "tasks": tasks_in_progress,
+        "jobs": jobs_snapshot,           # per-job progress (see /jobs for the same)
+        "media_generation": media_gen,   # bumps on every add/delete so UI knows to refetch
         "whisper_available": audio_ingest.WHISPER_AVAILABLE,
         "heic_supported": ingestion.is_heic_supported(),
         "yolo_available": yolo_detect.YOLO_AVAILABLE,
@@ -126,6 +218,18 @@ def get_status():
         "effective_model": effective,                  # what core will actually load
         "model_fallback": requested != effective,      # True when a fallback is in effect
     }
+
+
+@app.get("/jobs")
+def get_jobs():
+    """Return a snapshot of every active background job (reindex / add / sync).
+
+    The same `jobs` array is included on /status, but exposing a dedicated
+    endpoint lets the UI poll progress without pulling the rest of /status.
+    """
+    with _tasks_lock:
+        # Deep-copy under the lock — see /status for the same rationale.
+        return {"jobs": [dict(v) for v in _active_jobs.values()], "count": len(_active_jobs)}
 
 def _parse_range_header(range_header: str, file_size: int):
     """Parse an HTTP Range header per RFC 7233.
@@ -522,24 +626,34 @@ def add_file(req: AddFileRequest, background_tasks: BackgroundTasks):
 def add_folder(req: SyncFolderRequest, background_tasks: BackgroundTasks):
     if not os.path.isdir(req.folder_path):
         raise HTTPException(status_code=400, detail="Invalid folder path")
-    
+
     folders = get_folders()
     if req.folder_path not in folders:
         folders.append(req.folder_path)
         save_folders(folders)
-        
+
     def process_folder_wrapper(folder_path):
-        global tasks_in_progress
-        with _tasks_lock:
-            tasks_in_progress += 1
         try:
-            ingestion.process_folder(folder_path)
-            # Auto-build ANN index once table is large enough to benefit
+            total = len(ingestion.get_media_files(folder_path))
+        except Exception:
+            total = 0
+        job_id = _start_job(
+            "add_folder",
+            total=total,
+            description=f"Indexing {os.path.basename(folder_path) or folder_path}",
+        )
+        try:
+            def _cb(done: int, total_now: int, current: str) -> None:
+                _update_job(job_id, done=done, total=total_now, current=current)
+            try:
+                ingestion.process_folder(folder_path, progress_cb=_cb)
+            except TypeError:
+                ingestion.process_folder(folder_path)
             if index_build.should_build_index():
                 index_build.build_ann_index()
         finally:
-            with _tasks_lock:
-                tasks_in_progress -= 1
+            _finish_job(job_id)
+            _bump_media_generation()
 
     background_tasks.add_task(process_folder_wrapper, req.folder_path)
     return {"message": "Folder added and sync started"}
@@ -551,20 +665,36 @@ def sync_all(background_tasks: BackgroundTasks):
         return {"message": "No folders to sync"}
         
     def sync_all_wrapper(folder_paths):
-        global tasks_in_progress
-        with _tasks_lock:
-            tasks_in_progress += 1
+        pre_total = 0
+        for fp in folder_paths:
+            if os.path.exists(fp):
+                try:
+                    pre_total += len(ingestion.get_media_files(fp))
+                except Exception:
+                    pass
+        job_id = _start_job("sync_all", total=pre_total, description="Syncing all folders")
+        overall_done = 0
         try:
             core.cleanup_missing_media()
             for fp in folder_paths:
-                if os.path.exists(fp):
+                if not os.path.exists(fp):
+                    continue
+                def _cb(done: int, _total: int, current: str, _base=overall_done) -> None:
+                    _update_job(job_id, done=_base + done, current=current)
+                try:
+                    ingestion.process_folder(fp, progress_cb=_cb)
+                except TypeError:
                     ingestion.process_folder(fp)
-            # Auto-build ANN index once table is large enough to benefit
+                try:
+                    overall_done += len(ingestion.get_media_files(fp))
+                except Exception:
+                    pass
+                _update_job(job_id, done=overall_done)
             if index_build.should_build_index():
                 index_build.build_ann_index()
         finally:
-            with _tasks_lock:
-                tasks_in_progress -= 1
+            _finish_job(job_id)
+            _bump_media_generation()
 
     background_tasks.add_task(sync_all_wrapper, folders)
     return {"message": "Syncing all folders started"}
@@ -582,25 +712,28 @@ def _reindex_all_wrapper() -> None:
     partial live table and rename the backup back. On success, drop the
     backup. This guarantees that a mid-run crash never destroys user data.
     """
-    global tasks_in_progress
-    import time as _time
+    # 0. Enumerate all reachable files upfront so the progress bar has a
+    # meaningful denominator. We pass per-folder counts to ingestion via the
+    # progress callback below.
+    folders = get_folders()
+    reachable: List[str] = [f for f in folders if os.path.isdir(f)]
+    for f in folders:
+        if not os.path.isdir(f):
+            print(f"[reindex_all] WARNING: folder unreachable, skipping: {f}")
 
-    with _tasks_lock:
-        tasks_in_progress += 1
+    pre_total = 0
+    for folder in reachable:
+        try:
+            pre_total += len(ingestion.get_media_files(folder))
+        except Exception:
+            pass
 
+    job_id = _start_job("reindex_all", total=pre_total, description="Re-indexing all folders")
     backup_name = f"media_backup_{int(_time.time())}"
     backup_created = False
+    overall_done = 0
     try:
-        # 1. Snapshot folders + validate reachability (warn but continue).
-        folders = get_folders()
-        reachable: List[str] = []
-        for folder in folders:
-            if os.path.isdir(folder):
-                reachable.append(folder)
-            else:
-                print(f"[reindex_all] WARNING: folder unreachable, skipping: {folder}")
-
-        # 2. Backup live table -> fresh empty table.
+        # 1. Backup live table -> fresh empty table.
         removed = core.backup_and_reset_table(backup_name)
         backup_created = True
         print(f"[reindex_all] Backed up {removed} rows to {backup_name!r}; live table reset.")
@@ -609,11 +742,23 @@ def _reindex_all_wrapper() -> None:
         # falsely skip files that need re-encoding.
         ingestion.clear_progress_file()
 
-        # 3. Re-ingest into the now-empty live table.
+        # 2. Re-ingest into the now-empty live table, streaming per-file
+        # progress into the job.
         for folder in reachable:
-            ingestion.process_folder(folder)
+            def _cb(done: int, total: int, current: str, _base=overall_done) -> None:
+                _update_job(job_id, done=_base + done, current=current)
+            try:
+                ingestion.process_folder(folder, progress_cb=_cb)
+            except TypeError:
+                # Backward compat if running against an older ingestion without progress_cb.
+                ingestion.process_folder(folder)
+            try:
+                overall_done += len(ingestion.get_media_files(folder))
+            except Exception:
+                pass
+            _update_job(job_id, done=overall_done)
 
-        # 4. Success — drop the backup.
+        # 3. Success — drop the backup.
         core.drop_backup(backup_name)
         backup_created = False
         print(f"[reindex_all] Reindex complete; dropped backup {backup_name!r}.")
@@ -631,8 +776,8 @@ def _reindex_all_wrapper() -> None:
                     f"Backup table is preserved for manual recovery."
                 )
     finally:
-        with _tasks_lock:
-            tasks_in_progress -= 1
+        _finish_job(job_id)
+        _bump_media_generation()
 
 
 @app.post("/reindex_all")
@@ -649,20 +794,31 @@ def reindex_all_endpoint(background_tasks: BackgroundTasks):
 
 
 def _reindex_folder_wrapper(folder_path: str) -> None:
-    global tasks_in_progress
-    with _tasks_lock:
-        tasks_in_progress += 1
+    try:
+        total = len(ingestion.get_media_files(folder_path)) if os.path.exists(folder_path) else 0
+    except Exception:
+        total = 0
+    job_id = _start_job(
+        "reindex_folder",
+        total=total,
+        description=f"Re-indexing {os.path.basename(folder_path) or folder_path}",
+    )
     try:
         core.delete_rows_under_folder(folder_path)
         if os.path.exists(folder_path):
-            ingestion.process_folder(folder_path)
+            def _cb(done: int, _total: int, current: str) -> None:
+                _update_job(job_id, done=done, current=current)
+            try:
+                ingestion.process_folder(folder_path, progress_cb=_cb)
+            except TypeError:
+                ingestion.process_folder(folder_path)
         else:
             print(f"[reindex_folder] Folder does not exist (no-op): {folder_path}")
     except Exception as exc:
         print(f"[reindex_folder] Error: {exc}")
     finally:
-        with _tasks_lock:
-            tasks_in_progress -= 1
+        _finish_job(job_id)
+        _bump_media_generation()
 
 
 @app.post("/reindex_folder")
@@ -850,6 +1006,9 @@ def delete_folders(req: DeleteFoldersRequest):
         except Exception as e:
             print(f"[/folders] delete error for {p}: {e}")
     save_folders(folders)
+    # Bump so the home page knows to refetch /media even though no ingest ran.
+    if removed:
+        _bump_media_generation()
     return {"removed": removed, "remaining_count": len(folders)}
 
 
@@ -858,12 +1017,12 @@ class AddFilesRequest(BaseModel):
 
 
 def _add_files_wrapper(filepaths: List[str]) -> None:
-    global tasks_in_progress
-    with _tasks_lock:
-        tasks_in_progress += 1
+    job_id = _start_job("add_files", total=len(filepaths), description=f"Adding {len(filepaths)} file(s)")
+    added_any = False
     try:
         existing_paths = core.get_existing_paths()
-        for fp in filepaths:
+        for idx, fp in enumerate(filepaths):
+            _update_job(job_id, done=idx, current=os.path.basename(fp))
             ext = os.path.splitext(fp)[1].lower()
             norm_fp = platform_utils.normalize_path(fp)
             if norm_fp in existing_paths:
@@ -877,18 +1036,22 @@ def _add_files_wrapper(filepaths: List[str]) -> None:
                         # Persist frame rows BEFORE audio ingest so audio
                         # segments are never orphaned on a mid-flight crash.
                         core.add_media(recs)
+                        added_any = True
                         ingestion.ingest_video_audio_if_enabled(norm_fp, video_id)
                         existing_paths.add(norm_fp)
                 else:
                     rec = ingestion.process_image(fp)
                     if rec:
                         core.add_media([rec])
+                        added_any = True
                         existing_paths.add(norm_fp)
             except Exception as e:
                 print(f"[/add_files] failed {fp}: {e}")
+        _update_job(job_id, done=len(filepaths), current="")
     finally:
-        with _tasks_lock:
-            tasks_in_progress -= 1
+        _finish_job(job_id)
+        if added_any:
+            _bump_media_generation()
 
 
 @app.post("/add_files")
@@ -915,60 +1078,83 @@ def add_files(req: AddFilesRequest, background_tasks: BackgroundTasks):
 # Model status + warmup endpoints
 # ---------------------------------------------------------------------------
 
-def _hf_model_downloaded(*needles: str) -> bool:
-    """Check whether ANY of the given name fragments appears as a HuggingFace
-    cache directory.
+# CLIP repo id mirrors core._HF_ONNX_REPO_ID — kept local so this module
+# doesn't reach into core's private name.
+_HF_CLIP_REPO_ID = "Xenova/clip-vit-large-patch14"
 
-    HF caches under ~/.cache/huggingface/hub/ as ``models--<org>--<repo>``
-    so we match against sanitized repo names. Callers should pass multiple
-    candidate substrings to be liberal about exact ONNX repo naming.
+
+def _hf_file_cached(repo_id: str, filename: str, min_bytes: int = 1) -> bool:
+    """Strict check: a specific file is fully present in the HF cache.
+
+    Why this matters: the old substring-match on cache dir names returned
+    True the moment HF created `models--<org>--<repo>/` — which happens
+    BEFORE any file finishes downloading. The Settings UI then hid the
+    Download button while no model file existed on disk; on next refresh
+    the substring still matched, so we never re-triggered the download.
+
+    Uses huggingface_hub.try_to_load_from_cache so we follow the same
+    snapshot/blob symlink dance HF uses internally; a partial `.incomplete`
+    file is reported as missing here, matching what hf_hub_download would
+    do at runtime.
     """
-    from pathlib import Path
-    hf_cache = Path(os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")))
-    if not hf_cache.exists():
+    try:
+        from huggingface_hub import try_to_load_from_cache  # lazy import
+        path = try_to_load_from_cache(repo_id=repo_id, filename=filename)
+        if not isinstance(path, str):
+            return False
+        if not os.path.exists(path):
+            return False
+        try:
+            return os.path.getsize(path) >= min_bytes
+        except OSError:
+            return False
+    except Exception:
         return False
-    sanitized = [n.replace("/", "_").replace("-", "").lower() for n in needles]
-    for child in hf_cache.rglob("*"):
-        if not child.is_dir():
-            continue
-        cname = child.name.replace("-", "").lower()
-        for needle in sanitized:
-            if needle in cname:
-                return True
-    return False
 
 
-def _whisper_downloaded() -> bool:
-    """Check if any faster-whisper model is in the HF cache.
-
-    faster-whisper auto-downloads to
-    ~/.cache/huggingface/hub/models--Systran--faster-whisper-<size>/.
-    """
-    from pathlib import Path
-    hf_hub = Path(os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))) / "hub"
-    if not hf_hub.exists():
+def _clip_downloaded() -> bool:
+    """CLIP is "downloaded" when tokenizer + at least one vision/text ONNX
+    pair is on disk. We accept fp16 OR fp32 variants — _pick_onnx_files
+    will choose at load time."""
+    tok = _hf_file_cached(_HF_CLIP_REPO_ID, "tokenizer.json", min_bytes=10_000)
+    if not tok:
         return False
-    for child in hf_hub.iterdir():
-        if child.is_dir() and "faster-whisper" in child.name.lower():
+    candidates = [
+        ("onnx/vision_model_fp16.onnx", "onnx/text_model_fp16.onnx"),
+        ("onnx/vision_model.onnx",      "onnx/text_model.onnx"),
+    ]
+    # ONNX files for CLIP-L-14 are ~200-600 MB; require >= 100 MB to rule
+    # out partial downloads that the filesystem walk would accept.
+    for v, t in candidates:
+        if _hf_file_cached(_HF_CLIP_REPO_ID, v, min_bytes=100 * 1024 * 1024) and \
+           _hf_file_cached(_HF_CLIP_REPO_ID, t, min_bytes=10 * 1024 * 1024):
             return True
     return False
 
 
-def _yolo_downloaded() -> bool:
-    """Check if the YOLOv8n ONNX bundle has been fetched from HF.
+def _whisper_downloaded() -> bool:
+    """faster-whisper's `model.bin` (CTranslate2) is the gating artifact.
 
-    The ONNX yolo_detect path uses Xenova/yolov8n which caches under
-    ~/.cache/huggingface/hub/models--Xenova--yolov8n/. The legacy
-    yolov8n.pt path (CWD / ultralytics cache) is no longer probed because
-    the ultralytics backend is gone.
+    The repo also ships `config.json` + `tokenizer.json` (small) — those
+    can be cached before model.bin finishes, so we only trust model.bin.
     """
-    from pathlib import Path
-    hf_hub = Path(os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))) / "hub"
-    if hf_hub.exists():
-        for child in hf_hub.iterdir():
-            if child.is_dir() and "yolov8" in child.name.lower():
-                return True
-    return False
+    size = "base"
+    try:
+        size = (config.get_current_level_params().get("whisper_model") or "base").lower()
+    except Exception:
+        pass
+    repo_id = f"Systran/faster-whisper-{size}"
+    # base ~150 MB, small ~500 MB, medium ~1.5 GB — pick a safe lower
+    # bound of 50 MB to be smaller than even the smallest variant.
+    return _hf_file_cached(repo_id, "model.bin", min_bytes=50 * 1024 * 1024)
+
+
+def _yolo_downloaded() -> bool:
+    """YOLOv8n ONNX is ~12 MB. Require >= 9 MB so a partial / .incomplete
+    download is not treated as success."""
+    return _hf_file_cached("Xenova/yolov8n", "onnx/model.onnx", min_bytes=9 * 1024 * 1024)
+
+
 
 
 def _ocr_downloaded() -> bool:
@@ -984,17 +1170,10 @@ def _clip_status() -> dict:
     cfg_params = config.get_current_level_params()
     requested = cfg_params.get("model", "clip-ViT-L-14")
     effective = core.resolve_model_name(requested)
-    # Probe both the legacy sentence-transformers name and the ONNX repo
-    # name so users mid-migration who still have either cache layout see
-    # `downloaded: true`.
     return {
         "name": effective,
         "loaded": core.get_model_name() == effective,
-        "downloaded": _hf_model_downloaded(
-            "clip-ViT-L-14",
-            "clip-vit-large-patch14",
-            "Xenova/clip-vit-large-patch14",
-        ),
+        "downloaded": _clip_downloaded(),
     }
 
 
@@ -1193,13 +1372,17 @@ def models_warmup(req: WarmupRequest, background_tasks: BackgroundTasks):
 
 
 @app.post("/admin/wipe_data")
-def admin_wipe_data():
+def admin_wipe_data(purge_caches: bool = False):
     """Danger: wipe the entire SovLens app data directory.
 
     Deletes the LanceDB index, logs, HLS cache, YOLO crops, folders.json,
     progress.json — everything under platform_utils.get_app_data_dir().
-    Model caches under ~/.cache (HuggingFace, Whisper) and ~/.EasyOCR are
-    intentionally left alone because other AI tools may share them.
+
+    When ``purge_caches=true`` is supplied, ALSO removes the HuggingFace,
+    Whisper, and EasyOCR caches under the user home so the next launch
+    behaves as a fresh install (models redownload on first use). These
+    caches may be shared with other AI tools on the machine, so the flag
+    is opt-in.
 
     The backend process exits immediately after responding so file locks
     (LanceDB, log handlers) release cleanly. The Tauri shell will see the
@@ -1209,6 +1392,17 @@ def admin_wipe_data():
     import threading as _th
 
     data_dir = platform_utils.get_app_data_dir()
+    extra_dirs: List[str] = []
+    if purge_caches:
+        home = os.path.expanduser("~")
+        for sub in (
+            os.environ.get("HF_HOME"),
+            os.path.join(home, ".cache", "huggingface"),
+            os.path.join(home, ".cache", "whisper"),
+            os.path.join(home, ".EasyOCR"),
+        ):
+            if sub and os.path.isdir(sub) and sub not in extra_dirs:
+                extra_dirs.append(sub)
 
     def _on_rm_error(func, path, _exc_info):
         """rmtree onerror: chmod writable + retry once.
@@ -1263,11 +1457,16 @@ def admin_wipe_data():
                 # Final best-effort sweep so we never block exit.
                 if os.path.isdir(data_dir):
                     shutil.rmtree(data_dir, ignore_errors=True)
+            for extra in extra_dirs:
+                try:
+                    shutil.rmtree(extra, ignore_errors=True)
+                except Exception:
+                    pass
         finally:
             os._exit(0)
 
     _th.Thread(target=_wipe_and_exit, daemon=True).start()
-    return {"status": "ok", "wiped": data_dir}
+    return {"status": "ok", "wiped": data_dir, "extra_wiped": extra_dirs}
 
 
 if __name__ == "__main__":
@@ -1281,11 +1480,19 @@ if __name__ == "__main__":
     # IMPORTANT: pass the `app` object (not "main:app" import string) and
     # reload=False. Under PyInstaller's frozen exe, reload=True + import-string
     # causes uvicorn's reloader to re-exec the bootloader → backend never binds.
-    frozen = getattr(sys, "frozen", False)
+    # access_log=False on Windows: when launched as a child of the Tauri
+    # shell with no console, uvicorn's per-request log emit goes through
+    # sys.stdout which is a captured pipe. logging.flush() raises
+    # OSError(Errno 22, "Invalid argument") on every request once the
+    # pipe buffer hits a non-trivial size, polluting backend.log with
+    # repeated tracebacks (~30 lines per polled /models/status). The
+    # access info is rarely useful at runtime; killing it cleans up the
+    # log file and skips a syscall per request.
     uvicorn.run(
         app,
         host=args.host,
         port=args.port,
-        reload=False if frozen else False,  # keep reload off in dev too; use --reload if needed
+        reload=False,  # reload=True under PyInstaller frozen exe re-execs the bootloader -> never binds
         log_level="info",
+        access_log=False,
     )

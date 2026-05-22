@@ -70,8 +70,15 @@ export default function SettingsPage() {
   const [showWipeModal, setShowWipeModal] = useState(false);
   const [wipeMessage, setWipeMessage] = useState<string | null>(null);
   const [wipeInFlight, setWipeInFlight] = useState(false);
+  // Whether to also rm the shared HF/Whisper/EasyOCR caches when resetting.
+  // Opt-in — these caches may belong to other tools on the machine.
+  const [wipePurgeCaches, setWipePurgeCaches] = useState(false);
   const [isIngesting, setIsIngesting] = useState(false);
   const [reindexInFlight, setReindexInFlight] = useState(false);
+  // Active background job (reindex / add / sync) for the inline progress
+  // line under the Re-index button. Same shape as backend /jobs entries.
+  type JobInfo = { id: string; type: string; description: string; total: number; done: number; current: string };
+  const [activeJob, setActiveJob] = useState<JobInfo | null>(null);
 
   // AI model status. `warming` is a Set so multiple models can show
   // a "Downloading…" state in parallel (e.g. switching to Extreme).
@@ -215,22 +222,30 @@ export default function SettingsPage() {
     }
   }, []);
 
-  // Poll /status while a re-index is in flight
+  // Poll /status while ANY job (reindex/add/sync) might be running.
+  // Used to live-update the progress line under the Re-index button.
   useEffect(() => {
-    if (!reindexInFlight) return;
     const interval = setInterval(async () => {
       try {
         const res = await fetch(`${API_BASE}/status`);
         if (!res.ok) return;
-        const data = await res.json();
-        setIsIngesting(data.is_ingesting as boolean);
-        if (!(data.is_ingesting as boolean)) {
+        const data = await res.json() as { is_ingesting: boolean; jobs?: JobInfo[] };
+        setIsIngesting(data.is_ingesting);
+        const jobs = data.jobs ?? [];
+        if (jobs.length === 0) {
+          setActiveJob(null);
+        } else {
+          // Prefer the reindex job if one is running; else the largest by total.
+          const reindex = jobs.find((j) => j.type === "reindex_all");
+          setActiveJob(reindex ?? jobs.reduce((a, b) => (b.total > a.total ? b : a), jobs[0]));
+        }
+        if (!data.is_ingesting && reindexInFlight) {
           setReindexInFlight(false);
         }
       } catch {
         // backend may be temporarily busy; keep polling
       }
-    }, 3000);
+    }, 1500);
     return () => clearInterval(interval);
   }, [reindexInFlight]);
 
@@ -320,9 +335,16 @@ export default function SettingsPage() {
   const confirmWipe = async () => {
     setShowWipeModal(false);
     setWipeInFlight(true);
-    setWipeMessage("Wiping data and stopping backend… Please quit and reopen SovLens.");
+    setWipeMessage(
+      wipePurgeCaches
+        ? "Wiping data and AI model caches… Please quit and reopen SovLens."
+        : "Wiping data and stopping backend… Please quit and reopen SovLens.",
+    );
     try {
-      await fetch(`${API_BASE}/admin/wipe_data`, { method: "POST" });
+      const url = wipePurgeCaches
+        ? `${API_BASE}/admin/wipe_data?purge_caches=true`
+        : `${API_BASE}/admin/wipe_data`;
+      await fetch(url, { method: "POST" });
     } catch {
       // Backend will exit immediately after responding — the fetch may
       // surface a network error which is fine; treat it as success.
@@ -563,6 +585,26 @@ export default function SettingsPage() {
                 {reindexMessage}
               </p>
             )}
+            {/* Live progress bar driven by /status.jobs */}
+            {activeJob && activeJob.total > 0 && (
+              <div className="mb-3">
+                <div className="flex justify-between text-xs text-foreground/70 mb-1">
+                  <span>{activeJob.description}</span>
+                  <span>{activeJob.done} / {activeJob.total}</span>
+                </div>
+                <div className="h-1.5 w-full bg-foreground/10 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-accent transition-[width] duration-500"
+                    style={{ width: `${Math.min(100, Math.round((100 * activeJob.done) / activeJob.total))}%` }}
+                  />
+                </div>
+                {activeJob.current && (
+                  <p className="mt-1 text-[11px] text-foreground/50 truncate">
+                    {activeJob.current.split(/[\\/]/).pop()}
+                  </p>
+                )}
+              </div>
+            )}
             <button
               className={[
                 "px-4 py-2 rounded-lg border transition-colors text-sm",
@@ -606,10 +648,23 @@ export default function SettingsPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
           <div className="glass-panel rounded-2xl p-6 max-w-sm w-full mx-4 shadow-xl">
             <h3 className="text-lg font-semibold mb-2 text-red-500">Delete all SovLens data?</h3>
-            <p className="text-sm text-foreground/70 mb-6">
+            <p className="text-sm text-foreground/70 mb-4">
               This deletes the search index, logs, and cache. You&apos;ll need to re-scan your
               folders next time you open SovLens. This cannot be undone.
             </p>
+            <label className="flex items-start gap-2 mb-6 cursor-pointer text-sm text-foreground/80">
+              <input
+                type="checkbox"
+                checked={wipePurgeCaches}
+                onChange={(e) => setWipePurgeCaches(e.target.checked)}
+                className="mt-0.5 accent-red-500"
+              />
+              <span>
+                Also delete downloaded AI model files (~1 GB). Forces a fresh
+                redownload on next launch. Only do this if you want a truly clean
+                install — these caches may be shared with other AI tools on your machine.
+              </span>
+            </label>
             <div className="flex gap-3 justify-end">
               <button
                 onClick={() => setShowWipeModal(false)}

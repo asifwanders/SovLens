@@ -50,6 +50,13 @@ export default function Home() {
   const [syncing, setSyncing] = useState(false);
   const [isIngesting, setIsIngesting] = useState(false);
   const isIngestingRef = useRef(false);
+  // Track backend's media_generation counter — bumps on every add/delete.
+  // Lets the home grid refresh after a folder is removed (or anything else
+  // mutates the table) without waiting for an ingest-end edge transition.
+  const mediaGenRef = useRef<number>(-1);
+  // Active job (reindex / add_folder / add_files) for the in-page banner.
+  type JobInfo = { id: string; type: string; description: string; total: number; done: number; current: string };
+  const [activeJob, setActiveJob] = useState<JobInfo | null>(null);
 
   // ── A. Drag-drop state ───────────────────────────────────────────────────
   const [dragOver, setDragOver] = useState(false);
@@ -111,13 +118,34 @@ export default function Home() {
     const interval = setInterval(async () => {
       try {
         const res = await fetch(`${API}/status`);
-        const data = await res.json() as { is_ingesting: boolean };
+        const data = await res.json() as {
+          is_ingesting: boolean;
+          media_generation?: number;
+          jobs?: JobInfo[];
+        };
 
-        if (isIngestingRef.current && !data.is_ingesting) {
+        // Refresh on ingest-end edge OR on media_generation bump (covers
+        // folder deletes which don't go through the ingest path).
+        const gen = data.media_generation ?? 0;
+        const ingestJustEnded = isIngestingRef.current && !data.is_ingesting;
+        const generationChanged = mediaGenRef.current !== -1 && mediaGenRef.current !== gen;
+        if (ingestJustEnded || generationChanged) {
           setOffset(0);
           setHasMore(true);
           fetchMedia(0);
           refreshKnownPaths();
+        }
+        mediaGenRef.current = gen;
+
+        // Pick the most informative active job (the one with the highest
+        // total). Multiple background tasks can run in parallel but the
+        // user usually only kicks one off at a time.
+        const jobs = data.jobs ?? [];
+        if (jobs.length === 0) {
+          setActiveJob(null);
+        } else {
+          const best = jobs.reduce((a, b) => (b.total > a.total ? b : a), jobs[0]);
+          setActiveJob(best);
         }
 
         isIngestingRef.current = data.is_ingesting;
@@ -340,11 +368,36 @@ export default function Home() {
         </div>
       )}
 
-      {/* Ingestion spinner */}
+      {/* Ingestion spinner — shows live progress (N of M files) when /jobs
+          reports an active job. Falls back to a generic message otherwise. */}
       {isIngesting && (
-        <div className="absolute top-8 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 bg-black/80 dark:bg-white/10 backdrop-blur-xl text-white px-6 py-3 rounded-full shadow-2xl border border-white/10 animate-in slide-in-from-top-4">
-          <div className="w-5 h-5 border-2 border-[#00b9a0] border-t-transparent rounded-full animate-spin" />
-          <span className="text-sm font-medium">AI is analyzing media…</span>
+        <div className="absolute top-8 left-1/2 -translate-x-1/2 z-50 flex flex-col items-center gap-2 bg-black/80 dark:bg-white/10 backdrop-blur-xl text-white px-6 py-3 rounded-2xl shadow-2xl border border-white/10 animate-in slide-in-from-top-4 min-w-[320px]">
+          <div className="flex items-center gap-3 w-full">
+            <div className="w-5 h-5 border-2 border-[#00b9a0] border-t-transparent rounded-full animate-spin shrink-0" />
+            <span className="text-sm font-medium flex-1 truncate">
+              {activeJob?.description ?? "AI is analyzing media…"}
+              {activeJob && activeJob.total > 0
+                ? ` — ${activeJob.done} / ${activeJob.total}`
+                : ""}
+            </span>
+          </div>
+          {activeJob && activeJob.total > 0 && (
+            <>
+              <div className="h-1 w-full bg-white/15 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-[#00b9a0] transition-[width] duration-500"
+                  style={{
+                    width: `${Math.min(100, Math.round((100 * activeJob.done) / activeJob.total))}%`,
+                  }}
+                />
+              </div>
+              {activeJob.current && (
+                <div className="text-[10px] text-white/60 w-full truncate">
+                  {activeJob.current.split(/[\\/]/).pop()}
+                </div>
+              )}
+            </>
+          )}
         </div>
       )}
 

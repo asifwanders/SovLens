@@ -637,16 +637,30 @@ def get_media_files(folder_path: str) -> List[str]:
     return files
 
 
-def process_folder(folder_path: str) -> None:
+def process_folder(folder_path: str, progress_cb=None) -> None:
     """
     Ingest all media in folder_path into LanceDB.
 
     Resumes gracefully: completed files are skipped; in-progress videos are
     cleaned from the DB and re-ingested from scratch.
+
+    ``progress_cb(done, total, current_path)`` — optional. Called once per
+    file as the loop advances (after the dedup skip check) so the caller
+    can drive a UI progress bar. Errors raised by the callback are
+    swallowed so ingest is never blocked by a UI hiccup.
     """
     files = get_media_files(folder_path)
+    total_files = len(files)
     existing_paths = core.get_existing_paths()
     progress = _load_progress()
+
+    def _emit(done: int, current: str) -> None:
+        if progress_cb is None:
+            return
+        try:
+            progress_cb(done, total_files, current)
+        except Exception:
+            pass
 
     # Clean up any video that was interrupted mid-ingest
     for vpath, info in list(progress.items()):
@@ -669,8 +683,9 @@ def process_folder(folder_path: str) -> None:
     image_exts = {".jpg", ".jpeg", ".png", ".heic", ".heif"}
     video_exts = {".mp4", ".mov", ".avi", ".mkv"}
 
-    for f in files:
+    for _idx, f in enumerate(files):
         f = platform_utils.normalize_path(f)
+        _emit(_idx, f)
         file_status = progress.get(f, {}).get("status")
         # Skip if already in DB AND not an interrupted in-progress entry
         if f in existing_paths and file_status != "in_progress":
@@ -724,3 +739,4 @@ def process_folder(folder_path: str) -> None:
             _flush()
 
     _flush()
+    _emit(total_files, "")
