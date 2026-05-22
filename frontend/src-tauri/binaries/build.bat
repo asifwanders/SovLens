@@ -46,7 +46,7 @@ popd
 REM PyInstaller onedir output: dist\sovlens-backend\{sovlens-backend.exe, _internal\...}
 set "SRC_DIR=%BACKEND_DIR%\dist\sovlens-backend"
 set "SRC_EXE=%SRC_DIR%\sovlens-backend.exe"
-set "ARCHIVE=%BINARIES_DIR%\sovlens-backend.zip"
+set "ARCHIVE=%BINARIES_DIR%\sovlens-backend.tar.gz"
 
 if not exist "%SRC_DIR%" (
     echo ERROR: Expected onedir folder not found at %SRC_DIR% >&2
@@ -62,14 +62,15 @@ if not exist "%BINARIES_DIR%" mkdir "%BINARIES_DIR%"
 REM Remove any stale archive first so a partial write doesn't fool the size guard.
 if exist "%ARCHIVE%" del /F /Q "%ARCHIVE%"
 
-REM tar.exe ships on Windows 10+ (since build 17063). `-a` infers archive
-REM format from the output extension (.zip => zip). `-C` changes into the
-REM source parent so the archive root is `sovlens-backend\` (not the full
+REM tar.exe ships on Windows 10+ (since build 17063). -czf produces gzip
+REM tarball; same format used by mac/linux build.sh so the Rust shell
+REM only needs ONE extraction codepath. -C changes into the source
+REM parent so the archive root is `sovlens-backend\` (not the full
 REM PyInstaller dist path).
 echo =^> Packing archive: %ARCHIVE%
-tar -a -cf "%ARCHIVE%" -C "%BACKEND_DIR%\dist" sovlens-backend
+tar -czf "%ARCHIVE%" -C "%BACKEND_DIR%\dist" sovlens-backend
 if errorlevel 1 (
-    echo ERROR: tar zip pack failed >&2
+    echo ERROR: tar gzip pack failed >&2
     exit /b 1
 )
 

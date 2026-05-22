@@ -366,7 +366,7 @@ jobs:
       - name: Verify sidecar archive (Windows)
         shell: pwsh
         run: |
-          $archive = "frontend\src-tauri\binaries\sovlens-backend.zip"
+          $archive = "frontend\src-tauri\binaries\sovlens-backend.tar.gz"
           if (-not (Test-Path $archive)) {
             Write-Error "::error::No sidecar archive at $archive"
             exit 1

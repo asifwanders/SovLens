@@ -93,18 +93,10 @@ fn read_recent_logs(max_bytes: usize) -> Result<String, String> {
 
 use std::path::{Path, PathBuf};
 
-/// Extract the sidecar archive (zip on Windows, tar.gz elsewhere) into `dest`.
-/// `dest` should be the parent directory; the archive root entry is
-/// `sovlens-backend/` so the bootloader ends up at `<dest>/sovlens-backend/…`.
-#[cfg(target_os = "windows")]
-fn extract_sidecar(archive: &Path, dest: &Path) -> Result<(), String> {
-    let file = std::fs::File::open(archive)
-        .map_err(|e| format!("open archive {}: {}", archive.display(), e))?;
-    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("zip open: {}", e))?;
-    zip.extract(dest).map_err(|e| format!("zip extract: {}", e))
-}
-
-#[cfg(not(target_os = "windows"))]
+/// Extract the sidecar tar.gz into `dest`. Same archive format on every OS;
+/// build.bat / build.sh both produce `sovlens-backend.tar.gz`. The archive
+/// root entry is `sovlens-backend/` so the bootloader ends up at
+/// `<dest>/sovlens-backend/…`.
 fn extract_sidecar(archive: &Path, dest: &Path) -> Result<(), String> {
     let file = std::fs::File::open(archive)
         .map_err(|e| format!("open archive {}: {}", archive.display(), e))?;
@@ -309,21 +301,16 @@ pub fn run() {
                     "sovlens-backend"
                 };
 
-                // Archive ships as a single bundle resource at:
-                //   <resource_dir>/binaries/sovlens-backend.tar.gz   (mac/linux)
-                //   <resource_dir>/binaries/sovlens-backend.zip      (windows)
+                // Archive ships as a single bundle resource:
+                //   <resource_dir>/binaries/sovlens-backend.tar.gz
+                // Same gzip-tar format on every OS — build.bat uses Win10+
+                // bundled tar.exe with -czf so the extraction codepath is one.
                 // We extract on first launch into the per-user app-data dir
                 // (writable under Win NSIS currentUser install), tagging the
                 // extracted tree with a `.sidecar-version` file matching
                 // CARGO_PKG_VERSION so app upgrades trigger a re-extract.
-                let archive_name = if cfg!(target_os = "windows") {
-                    "sovlens-backend.zip"
-                } else {
-                    "sovlens-backend.tar.gz"
-                };
-
                 let archive_resolved = app.path()
-                    .resolve(format!("binaries/{}", archive_name),
+                    .resolve("binaries/sovlens-backend.tar.gz",
                              tauri::path::BaseDirectory::Resource);
 
                 // Per-user writable extract root: <app_data>/sidecar/

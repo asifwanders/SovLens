@@ -34,11 +34,9 @@ image = "0.25"
 dirs = "5"
 chrono = "0.4"
 # Sidecar archive extraction. Onedir PyInstaller output ships as a single
-# .tar.gz (mac/linux) or .zip (win) bundle resource and is unpacked into
-# the app-data dir on first launch (or after upgrade).
-zip = { version = "2.0", default-features = false, features = ["deflate"] }
-
-[target.'cfg(not(target_os = "windows"))'.dependencies]
+# .tar.gz bundle resource on every OS (Win10+ tar.exe handles gzip via
+# `tar -czf`) and is unpacked into the app-data dir on first launch (or
+# after upgrade). Single codepath, no per-OS zip/tar split.
 tar = "0.4"
 flate2 = "1.0"
 
