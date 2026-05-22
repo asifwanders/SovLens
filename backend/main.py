@@ -204,9 +204,20 @@ def _start_job(job_type: str, total: int = 0, description: str = "") -> str:
             "done": 0,
             "current": "",
             "started_at": _time.time(),
+            # User can flip this via POST /jobs/{id}/cancel. Each wrapper
+            # polls _is_cancelled(job_id) at safe boundaries (between
+            # files, between folders) and breaks out gracefully.
+            "cancelled": False,
         }
         tasks_in_progress += 1
     return job_id
+
+
+def _is_cancelled(job_id: str) -> bool:
+    """True if the user requested cancellation for this job."""
+    with _tasks_lock:
+        job = _active_jobs.get(job_id)
+        return job is not None and bool(job.get("cancelled", False))
 
 
 def _update_job(job_id: str, **kwargs) -> None:
@@ -322,12 +333,21 @@ def get_status():
         # read while another thread mutates a job's `done`/`current`.
         jobs_snapshot = [dict(v) for v in _active_jobs.values()]
         media_gen = _media_generation
+    # Cheap probe of CTranslate2's CUDA visibility; result is stable for
+    # a given process so cache after first call.
+    whisper_device = None
+    if audio_ingest.WHISPER_AVAILABLE:
+        try:
+            whisper_device, _ = audio_ingest._detect_device()
+        except Exception:
+            whisper_device = None
     return {
         "is_ingesting": tasks_in_progress > 0,
         "tasks": tasks_in_progress,
         "jobs": jobs_snapshot,           # per-job progress (see /jobs for the same)
         "media_generation": media_gen,   # bumps on every add/delete so UI knows to refetch
         "whisper_available": audio_ingest.WHISPER_AVAILABLE,
+        "whisper_device": whisper_device,  # "cuda" | "cpu" | None — for UI hint
         "heic_supported": ingestion.is_heic_supported(),
         "yolo_available": yolo_detect.YOLO_AVAILABLE,
         "ocr_available": ocr_detect.OCR_AVAILABLE,
@@ -348,6 +368,26 @@ def get_jobs():
     with _tasks_lock:
         # Deep-copy under the lock — see /status for the same rationale.
         return {"jobs": [dict(v) for v in _active_jobs.values()], "count": len(_active_jobs)}
+
+
+@app.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: str):
+    """Request graceful cancellation of an active background job.
+
+    Sets the per-job `cancelled` flag. The worker wrapper polls
+    _is_cancelled(job_id) at safe boundaries (between files, between
+    folders) and breaks out — partial in-flight work for the current
+    file completes so the DB stays consistent. Idempotent: cancelling
+    an already-finished job is a no-op (404 only on never-existed).
+    """
+    with _tasks_lock:
+        job = _active_jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"no active job with id {job_id!r}")
+        job["cancelled"] = True
+        job["current"] = "Cancelling…"
+    print(f"[/jobs/cancel] flagged job_id={job_id}", flush=True)
+    return {"status": "ok", "job_id": job_id}
 
 def _parse_range_header(range_header: str, file_size: int):
     """Parse an HTTP Range header per RFC 7233.
@@ -763,11 +803,16 @@ def add_folder(req: SyncFolderRequest, background_tasks: BackgroundTasks):
         try:
             def _cb(done: int, total_now: int, current: str) -> None:
                 _update_job(job_id, done=done, total=total_now, current=current)
+            def _cancel_check(_jid=job_id) -> bool:
+                return _is_cancelled(_jid)
             try:
-                ingestion.process_folder(folder_path, progress_cb=_cb)
+                ingestion.process_folder(folder_path, progress_cb=_cb, cancel_check=_cancel_check)
             except TypeError:
-                ingestion.process_folder(folder_path)
-            if index_build.should_build_index():
+                try:
+                    ingestion.process_folder(folder_path, progress_cb=_cb)
+                except TypeError:
+                    ingestion.process_folder(folder_path)
+            if not _is_cancelled(job_id) and index_build.should_build_index():
                 index_build.build_ann_index()
         finally:
             _finish_job(job_id)
@@ -795,20 +840,28 @@ def sync_all(background_tasks: BackgroundTasks):
         try:
             core.cleanup_missing_media()
             for fp in folder_paths:
+                if _is_cancelled(job_id):
+                    print(f"[sync_all] cancelled before folder {fp!r}", flush=True)
+                    break
                 if not os.path.exists(fp):
                     continue
                 def _cb(done: int, _total: int, current: str, _base=overall_done) -> None:
                     _update_job(job_id, done=_base + done, current=current)
+                def _cancel_check(_jid=job_id) -> bool:
+                    return _is_cancelled(_jid)
                 try:
-                    ingestion.process_folder(fp, progress_cb=_cb)
+                    ingestion.process_folder(fp, progress_cb=_cb, cancel_check=_cancel_check)
                 except TypeError:
-                    ingestion.process_folder(fp)
+                    try:
+                        ingestion.process_folder(fp, progress_cb=_cb)
+                    except TypeError:
+                        ingestion.process_folder(fp)
                 try:
                     overall_done += len(ingestion.get_media_files(fp))
                 except Exception:
                     pass
                 _update_job(job_id, done=overall_done)
-            if index_build.should_build_index():
+            if not _is_cancelled(job_id) and index_build.should_build_index():
                 index_build.build_ann_index()
         finally:
             _finish_job(job_id)
@@ -866,13 +919,22 @@ def _reindex_all_wrapper() -> None:
         # 2. Re-ingest into the now-empty live table, streaming per-file
         # progress into the job.
         for folder in reachable:
+            if _is_cancelled(job_id):
+                print(f"[reindex_all] cancelled before folder {folder!r}", flush=True)
+                break
             def _cb(done: int, total: int, current: str, _base=overall_done) -> None:
                 _update_job(job_id, done=_base + done, current=current)
+            def _cancel_check(_jid=job_id) -> bool:
+                return _is_cancelled(_jid)
             try:
-                ingestion.process_folder(folder, progress_cb=_cb)
+                ingestion.process_folder(folder, progress_cb=_cb, cancel_check=_cancel_check)
             except TypeError:
-                # Backward compat if running against an older ingestion without progress_cb.
-                ingestion.process_folder(folder)
+                # Backward compat if running against an older ingestion
+                # signature (no cancel_check / progress_cb kwarg).
+                try:
+                    ingestion.process_folder(folder, progress_cb=_cb)
+                except TypeError:
+                    ingestion.process_folder(folder)
             try:
                 overall_done += len(ingestion.get_media_files(folder))
             except Exception:
@@ -929,10 +991,15 @@ def _reindex_folder_wrapper(folder_path: str) -> None:
         if os.path.exists(folder_path):
             def _cb(done: int, _total: int, current: str) -> None:
                 _update_job(job_id, done=done, current=current)
+            def _cancel_check(_jid=job_id) -> bool:
+                return _is_cancelled(_jid)
             try:
-                ingestion.process_folder(folder_path, progress_cb=_cb)
+                ingestion.process_folder(folder_path, progress_cb=_cb, cancel_check=_cancel_check)
             except TypeError:
-                ingestion.process_folder(folder_path)
+                try:
+                    ingestion.process_folder(folder_path, progress_cb=_cb)
+                except TypeError:
+                    ingestion.process_folder(folder_path)
         else:
             print(f"[reindex_folder] Folder does not exist (no-op): {folder_path}")
     except Exception as exc:
@@ -1164,6 +1231,9 @@ def _add_files_wrapper(filepaths: List[str]) -> None:
     try:
         existing_paths = core.get_existing_paths()
         for idx, fp in enumerate(filepaths):
+            if _is_cancelled(job_id):
+                print(f"[add_files] cancelled at idx={idx}/{len(filepaths)}", flush=True)
+                break
             _update_job(job_id, done=idx, current=os.path.basename(fp))
             ext = os.path.splitext(fp)[1].lower()
             norm_fp = platform_utils.normalize_path(fp)

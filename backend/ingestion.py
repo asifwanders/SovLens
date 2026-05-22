@@ -637,7 +637,7 @@ def get_media_files(folder_path: str) -> List[str]:
     return files
 
 
-def process_folder(folder_path: str, progress_cb=None) -> None:
+def process_folder(folder_path: str, progress_cb=None, cancel_check=None) -> None:
     """
     Ingest all media in folder_path into LanceDB.
 
@@ -648,6 +648,10 @@ def process_folder(folder_path: str, progress_cb=None) -> None:
     file as the loop advances (after the dedup skip check) so the caller
     can drive a UI progress bar. Errors raised by the callback are
     swallowed so ingest is never blocked by a UI hiccup.
+
+    ``cancel_check()`` — optional. Polled at the top of every file's loop
+    iteration. If it returns True the loop breaks cleanly — any
+    pending DB batch is still flushed so the table stays consistent.
     """
     files = get_media_files(folder_path)
     total_files = len(files)
@@ -684,6 +688,13 @@ def process_folder(folder_path: str, progress_cb=None) -> None:
     video_exts = {".mp4", ".mov", ".avi", ".mkv"}
 
     for _idx, f in enumerate(files):
+        if cancel_check is not None:
+            try:
+                if cancel_check():
+                    print(f"[process_folder] cancelled at idx={_idx}/{total_files}")
+                    break
+            except Exception:
+                pass
         f = platform_utils.normalize_path(f)
         _emit(_idx, f)
         file_status = progress.get(f, {}).get("status")

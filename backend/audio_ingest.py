@@ -52,15 +52,37 @@ def _detect_device() -> Tuple[str, str]:
 
     CUDA presence is probed via ctranslate2.get_cuda_device_count(), so we
     don't pull torch into this module.
+
+    Loud diagnostic at INFO so backend.log records WHY the fallback was
+    chosen — silent CPU fallback was a frequent end-user "why is GPU not
+    used" question. CTranslate2 needs CUDA 12 + cuDNN 9 runtime DLLs on
+    PATH; the wheel only bundles cudart + cublas. cuDNN must be
+    installed by the user separately (or we'd add ~500 MB to the bundle).
     """
     if sys.platform == "darwin":
+        logger.info("[whisper-device] cpu/int8 — mac (CTranslate2 has no MPS backend)")
         return ("cpu", "int8")
     try:
         import ctranslate2  # type: ignore
-        if ctranslate2.get_cuda_device_count() > 0:
+        try:
+            n = ctranslate2.get_cuda_device_count()
+        except Exception as probe_exc:
+            logger.warning(
+                "[whisper-device] cpu/int8 — CUDA probe crashed (%s) — usually means "
+                "cuDNN 9 DLLs missing from PATH; install NVIDIA cuDNN 9 for CUDA 12 "
+                "or accept CPU transcription",
+                probe_exc,
+            )
+            return ("cpu", "int8")
+        if n > 0:
+            logger.info("[whisper-device] cuda/float16 — %d GPU(s) found", n)
             return ("cuda", "float16")
-    except Exception as exc:
-        logger.debug("ctranslate2 CUDA probe failed: %s", exc)
+        logger.info(
+            "[whisper-device] cpu/int8 — ctranslate2 reports 0 CUDA devices "
+            "(driver too old OR cuDNN 9 missing OR not a CUDA wheel)"
+        )
+    except ImportError as exc:
+        logger.warning("[whisper-device] cpu/int8 — ctranslate2 not importable: %s", exc)
     return ("cpu", "int8")
 
 

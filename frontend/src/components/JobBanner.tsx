@@ -27,6 +27,7 @@ type JobInfo = {
   total: number;
   done: number;
   current: string;
+  cancelled?: boolean;
 };
 
 type StatusResponse = {
@@ -37,6 +38,16 @@ type StatusResponse = {
 export default function JobBanner() {
   const [isIngesting, setIsIngesting] = useState(false);
   const [activeJob, setActiveJob] = useState<JobInfo | null>(null);
+  const [cancelling, setCancelling] = useState<string | null>(null);
+
+  const handleCancel = async (jobId: string) => {
+    setCancelling(jobId);
+    try {
+      await fetch(`${API}/jobs/${jobId}/cancel`, { method: "POST" });
+    } catch {
+      // backend may already have finished the job; next poll resolves
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -96,6 +107,16 @@ export default function JobBanner() {
             ? ` — ${activeJob.done} / ${activeJob.total}`
             : ""}
         </span>
+        {activeJob && (
+          <button
+            onClick={() => handleCancel(activeJob.id)}
+            disabled={cancelling === activeJob.id || activeJob.cancelled}
+            title="Stop indexing — finishes the current file then halts."
+            className="text-[11px] px-2 py-1 rounded border border-white/20 hover:bg-white/10 text-white/80 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            {activeJob.cancelled || cancelling === activeJob.id ? "Stopping…" : "Stop"}
+          </button>
+        )}
       </div>
       {pct !== null && (
         <div className="h-1 w-full bg-white/15 rounded-full overflow-hidden">
