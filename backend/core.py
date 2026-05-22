@@ -881,34 +881,48 @@ def drop_backup(backup_name: str) -> None:
 def delete_rows_under_folder(folder_path: str) -> int:
     """Delete rows whose path is exactly the folder or is a strict descendant.
 
-    Uses 'path = prefix OR path LIKE prefix/sep/%' instead of a bare LIKE prefix%
-    to prevent false-positive matches on sibling paths with the same prefix
-    (e.g. /Photos_old/x.jpg must NOT be deleted when folder_path=/Photos).
+    Uses starts_with(path, prefix+sep) instead of LIKE because DataFusion
+    (the SQL engine inside LanceDB) treats backslash as the default LIKE
+    escape character. On Windows that means
+        path LIKE 'c:\\users\\foo\\%'
+    becomes a pattern where every '\\X' is interpreted as an escape and
+    the trailing '\\%' is a literal percent sign — matches nothing.
+    Empirically confirmed by /folders DELETE logs showing 'rows: 0 -> 0'
+    for a folder that clearly had indexed media.
+
+    starts_with() has no escape semantics. The descendant test uses
+    prefix + sep (with explicit trailing separator) so /Photos doesn't
+    accidentally delete /Photos_old/.
     """
     norm = platform_utils.normalize_path(folder_path)
-    safe = norm.replace("'", "''")
-    # normalize_path uses os.sep (backslash on Windows, forward slash on POSIX).
-    # Strip trailing sep so the pattern is deterministic regardless of caller input.
     sep = os.sep
-    # SQL string with backslash: LanceDB SQL passes the literal through to Arrow's
-    # LIKE matcher. Backslash is not a SQL escape in this dialect, so it's safe inline.
-    prefix = safe.rstrip(sep).rstrip("/")
+    # normalize_path uses os.sep; strip trailing for determinism.
+    prefix_raw = norm.rstrip(sep).rstrip("/")
+    safe_exact = prefix_raw.replace("'", "''")
+    safe_descendant = (prefix_raw + sep).replace("'", "''")
     try:
-        table.delete(f"path = '{prefix}' OR path LIKE '{prefix}{sep}%'")
+        table.delete(
+            f"path = '{safe_exact}' OR starts_with(path, '{safe_descendant}')"
+        )
     except Exception as e:
         print(f"[core] delete_rows_under_folder error: {e}")
     return 1  # LanceDB delete doesn't return count
 
 
 def _count_rows_under_folder(folder_path: str) -> int:
-    """Count rows whose path is under the given folder (exact or descendant)."""
+    """Count rows whose path is under the given folder (exact or descendant).
+
+    Mirrors delete_rows_under_folder's filter — same starts_with()
+    fix so the count returned to the UI matches what a delete would hit.
+    """
     norm = platform_utils.normalize_path(folder_path)
-    safe = norm.replace("'", "''")
     sep = os.sep
-    prefix = safe.rstrip(sep).rstrip("/")
+    prefix_raw = norm.rstrip(sep).rstrip("/")
+    safe_exact = prefix_raw.replace("'", "''")
+    safe_descendant = (prefix_raw + sep).replace("'", "''")
     try:
         rows = table.to_lance().to_table(
-            filter=f"path = '{prefix}' OR path LIKE '{prefix}{sep}%'",
+            filter=f"path = '{safe_exact}' OR starts_with(path, '{safe_descendant}')",
             columns=["id"],
         )
         return rows.num_rows
