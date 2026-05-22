@@ -20,29 +20,23 @@ import platform_utils
 # ingest raises [WinError 2]. Must run before whisper.transcribe() ever.
 platform_utils.ensure_ffmpeg_on_path()
 
-# CUDA diagnostics — surface GPU detection state in backend.log on every
-# startup so users / bug reports can distinguish: CPU wheel got installed,
-# CUDA DLL missing, driver problem, or correctly using GPU.
-def _log_cuda_state() -> None:
+# ONNX Runtime diagnostics — surface ORT version + EP detection state in
+# backend.log on every startup so users / bug reports can distinguish: wrong
+# wheel installed, native EP DLL missing, or CPU-only fallback in effect.
+def _log_ort_state() -> None:
     try:
-        import torch as _t
-        print(f"[cuda] torch={_t.__version__}", flush=True)
-        print(f"[cuda] torch.version.cuda={_t.version.cuda}", flush=True)
-        print(f"[cuda] cuda.is_available={_t.cuda.is_available()}", flush=True)
-        print(f"[cuda] cuda.device_count={_t.cuda.device_count()}", flush=True)
-        print(f"[cuda] cudnn.is_available={_t.backends.cudnn.is_available()}", flush=True)
-        if _t.cuda.is_available():
-            print(f"[cuda] device_name={_t.cuda.get_device_name(0)}", flush=True)
-        else:
-            try:
-                _t.cuda.init()
-            except Exception as exc:
-                print(f"[cuda] init() error: {exc!r}", flush=True)
+        import onnxruntime as _ort
+        print(f"[ort] onnxruntime={_ort.__version__}", flush=True)
+        print(f"[ort] available_providers={_ort.get_available_providers()}", flush=True)
+        try:
+            print(f"[ort] selected_providers={platform_utils.get_onnx_providers()}", flush=True)
+        except Exception as exc:
+            print(f"[ort] get_onnx_providers() error: {exc!r}", flush=True)
     except Exception as exc:
-        print(f"[cuda] diagnostic crashed: {exc!r}", flush=True)
+        print(f"[ort] diagnostic crashed: {exc!r}", flush=True)
 
 
-_log_cuda_state()
+_log_ort_state()
 import hls_stream
 import json
 import mimetypes
@@ -709,7 +703,7 @@ def add_audio_to_video(req: AddAudioRequest, background_tasks: BackgroundTasks):
     if not audio_ingest.WHISPER_AVAILABLE:
         raise HTTPException(
             status_code=501,
-            detail="Whisper not installed. Run: pip install openai-whisper",
+            detail="Whisper not installed. Run: pip install faster-whisper",
         )
 
     if not os.path.exists(req.filepath):
@@ -921,59 +915,86 @@ def add_files(req: AddFilesRequest, background_tasks: BackgroundTasks):
 # Model status + warmup endpoints
 # ---------------------------------------------------------------------------
 
-def _hf_model_downloaded(name: str) -> bool:
-    """Check if a HuggingFace / sentence-transformers model is in the local cache."""
+def _hf_model_downloaded(*needles: str) -> bool:
+    """Check whether ANY of the given name fragments appears as a HuggingFace
+    cache directory.
+
+    HF caches under ~/.cache/huggingface/hub/ as ``models--<org>--<repo>``
+    so we match against sanitized repo names. Callers should pass multiple
+    candidate substrings to be liberal about exact ONNX repo naming.
+    """
     from pathlib import Path
     hf_cache = Path(os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")))
-    st_cache = Path(os.path.expanduser("~/.cache/torch/sentence_transformers"))
-    needle = name.replace("/", "_")
-    for base in (hf_cache, st_cache):
-        if not base.exists():
+    if not hf_cache.exists():
+        return False
+    sanitized = [n.replace("/", "_").replace("-", "").lower() for n in needles]
+    for child in hf_cache.rglob("*"):
+        if not child.is_dir():
             continue
-        for child in base.rglob("*"):
-            if child.is_dir() and needle in child.name:
+        cname = child.name.replace("-", "").lower()
+        for needle in sanitized:
+            if needle in cname:
                 return True
     return False
 
 
 def _whisper_downloaded() -> bool:
-    """Check if any Whisper model is in the local cache."""
+    """Check if any faster-whisper model is in the HF cache.
+
+    faster-whisper auto-downloads to
+    ~/.cache/huggingface/hub/models--Systran--faster-whisper-<size>/.
+    """
     from pathlib import Path
-    cache = Path(os.path.expanduser("~/.cache/whisper"))
-    if not cache.exists():
+    hf_hub = Path(os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))) / "hub"
+    if not hf_hub.exists():
         return False
-    return any(cache.iterdir())
+    for child in hf_hub.iterdir():
+        if child.is_dir() and "faster-whisper" in child.name.lower():
+            return True
+    return False
 
 
 def _yolo_downloaded() -> bool:
-    """Check if yolov8n.pt is on disk (CWD or common locations)."""
+    """Check if the YOLOv8n ONNX bundle has been fetched from HF.
+
+    The ONNX yolo_detect path uses Xenova/yolov8n which caches under
+    ~/.cache/huggingface/hub/models--Xenova--yolov8n/. The legacy
+    yolov8n.pt path (CWD / ultralytics cache) is no longer probed because
+    the ultralytics backend is gone.
+    """
     from pathlib import Path
-    candidates = [
-        Path("yolov8n.pt"),
-        Path(os.path.expanduser("~/.cache/ultralytics/assets/yolov8n.pt")),
-        Path(os.path.expanduser("~/.cache/ultralytics/yolov8n.pt")),
-        Path(platform_utils.get_app_data_dir()) / "yolov8n.pt",
-    ]
-    return any(p.exists() for p in candidates)
+    hf_hub = Path(os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))) / "hub"
+    if hf_hub.exists():
+        for child in hf_hub.iterdir():
+            if child.is_dir() and "yolov8" in child.name.lower():
+                return True
+    return False
 
 
-def _easyocr_downloaded() -> bool:
-    """Check if EasyOCR model files are present."""
-    from pathlib import Path
-    cache = Path(os.path.expanduser("~/.EasyOCR"))
-    if not cache.exists():
-        return False
-    return any(cache.rglob("*.pth")) or any(cache.rglob("*.pt"))
+def _ocr_downloaded() -> bool:
+    """RapidOCR ships its ONNX models inside the wheel — nothing to download.
+
+    Surface the OCR_AVAILABLE flag as `downloaded` so the UI's Download
+    button hides itself once the wheel is installed.
+    """
+    return bool(getattr(ocr_detect, "OCR_AVAILABLE", False))
 
 
 def _clip_status() -> dict:
     cfg_params = config.get_current_level_params()
     requested = cfg_params.get("model", "clip-ViT-L-14")
     effective = core.resolve_model_name(requested)
+    # Probe both the legacy sentence-transformers name and the ONNX repo
+    # name so users mid-migration who still have either cache layout see
+    # `downloaded: true`.
     return {
         "name": effective,
         "loaded": core.get_model_name() == effective,
-        "downloaded": _hf_model_downloaded(effective),
+        "downloaded": _hf_model_downloaded(
+            "clip-ViT-L-14",
+            "clip-vit-large-patch14",
+            "Xenova/clip-vit-large-patch14",
+        ),
     }
 
 
@@ -1019,10 +1040,10 @@ def _ocr_loaded() -> bool:
 
 def _ocr_status() -> dict:
     return {
-        "name": "easyocr",
+        "name": "rapidocr",
         "available": ocr_detect.OCR_AVAILABLE,
         "loaded": ocr_detect.OCR_AVAILABLE and _ocr_loaded(),
-        "downloaded": _easyocr_downloaded(),
+        "downloaded": _ocr_downloaded(),
     }
 
 

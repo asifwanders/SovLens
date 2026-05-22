@@ -584,7 +584,7 @@ def process_video(filepath: str, video_id: Optional[str] = None) -> List[Dict]:
                 print(f"[ingestion] YOLO crop embedding error: {exc}")
 
     elif params.get("yolo_enabled") and not yolo_detect.YOLO_AVAILABLE:
-        print("[ingestion] yolo_enabled=True but ultralytics not installed — skipping YOLO pass.")
+        print("[ingestion] yolo_enabled=True but onnxruntime YOLO backend unavailable — skipping YOLO pass.")
 
     # NOTE: Audio ingest used to run here, but audio_ingest.process_video_audio
     # inserts audio_segment rows directly into LanceDB. If it ran before the
@@ -607,7 +607,7 @@ def ingest_video_audio_if_enabled(filepath: str, video_id: str) -> None:
     if not params.get("audio_enabled"):
         return
     if not audio_ingest.WHISPER_AVAILABLE:
-        print("[ingestion] audio_enabled=True but openai-whisper not installed — skipping audio ingest.")
+        print("[ingestion] audio_enabled=True but faster-whisper not installed — skipping audio ingest.")
         return
     try:
         whisper_model = params.get("whisper_model", "base")

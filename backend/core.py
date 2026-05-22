@@ -1,18 +1,20 @@
 import os
+import json
 import threading
-import torch
 import lancedb
-from sentence_transformers import SentenceTransformer
 import pyarrow as pa
 import numpy as np
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from PIL import Image
 from scipy.fft import dct as _dct
 import platform_utils
 import config
 
-# Determine the best available device for hardware acceleration
-device = platform_utils.detect_torch_device()
+# ONNX Runtime replaces the torch + sentence-transformers stack for CLIP.
+# `device` is kept as a legacy module-level for callers / status endpoints
+# but now holds the active ONNX EP short-name ("coreml" / "cuda" / "dml" / "cpu")
+# rather than a torch device string. It is populated on first session init.
+device: str = "cpu"
 
 # ---------------------------------------------------------------------------
 # Lazy CLIP model management
@@ -31,9 +33,34 @@ _SUPPORTED_768D = {"clip-ViT-L-14"}
 # `model_name` column during migration.
 LEGACY_MODEL_NAME = "clip-ViT-L-14"
 
-_model: Optional[SentenceTransformer] = None
+# ONNX session state. The "model" is now a pair of ORT InferenceSessions
+# (vision + text) plus a tokenizer + preprocessing constants. The public
+# accessor get_model() is removed; callers used it only inside encode_*
+# helpers which now go through _ensure_sessions() directly.
+_vision_session: Any = None  # onnxruntime.InferenceSession
+_text_session: Any = None    # onnxruntime.InferenceSession
+_tokenizer: Any = None       # tokenizers.Tokenizer
 _model_name: Optional[str] = None
 _model_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# CLIP-ViT-L/14 preprocessing constants (image side).
+# These match openai/clip and sentence-transformers/clip-ViT-L-14 exactly so
+# vectors remain comparable with rows previously encoded by the torch model.
+# ---------------------------------------------------------------------------
+_CLIP_IMAGE_SIZE = 224
+_CLIP_MEAN = np.array([0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
+_CLIP_STD = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
+_CLIP_CONTEXT_LENGTH = 77
+
+# Hugging Face repo that ships ONNX exports of CLIP-ViT-L/14 (text+vision)
+# plus tokenizer.json and preprocessor_config.json. Xenova's mirror is the
+# canonical source for transformers.js-compatible ONNX bundles.
+_HF_ONNX_REPO_ID = "Xenova/clip-vit-large-patch14"
+# Subdirectory inside the repo that holds the ONNX files. Xenova ships both
+# fp32 (~600MB) and quantized (~150MB) variants; we prefer fp16 if available,
+# then fp32. Quantized int8 hurts retrieval recall and is skipped.
+_ONNX_SUBDIR = "onnx"
 
 
 def _resolve_model_name(requested: str) -> str:
@@ -57,22 +84,108 @@ def _resolve_model_name(requested: str) -> str:
     return LEGACY_MODEL_NAME
 
 
-def get_model() -> SentenceTransformer:
-    """Lazy-load and cache the CLIP model for the current config level.
+def _ep_short_name(provider: str) -> str:
+    """Map an ONNX Runtime provider id to a short label for `device`."""
+    return {
+        "CoreMLExecutionProvider": "coreml",
+        "CUDAExecutionProvider": "cuda",
+        "DmlExecutionProvider": "dml",
+        "CPUExecutionProvider": "cpu",
+    }.get(provider, provider.replace("ExecutionProvider", "").lower())
 
-    Thread-safe: only one thread loads the model; others wait at the lock.
-    If the config level changes the model name, the old model is replaced on
-    the next call.
+
+def _pick_onnx_files(onnx_dir: str) -> Tuple[str, str]:
+    """Return absolute paths to (vision_model, text_model) ONNX files.
+
+    Prefers fp16 (smaller, faster on CoreML/CUDA) when shipped, else fp32.
+    Skips int8/quantized variants — they noticeably hurt retrieval recall.
+    Raises FileNotFoundError with a descriptive message if neither is found.
     """
-    global _model, _model_name
+    candidates = [
+        ("vision_model_fp16.onnx", "text_model_fp16.onnx"),
+        ("vision_model.onnx", "text_model.onnx"),
+    ]
+    for vname, tname in candidates:
+        vp = os.path.join(onnx_dir, vname)
+        tp = os.path.join(onnx_dir, tname)
+        if os.path.isfile(vp) and os.path.isfile(tp):
+            return vp, tp
+    raise FileNotFoundError(
+        f"No CLIP ONNX files found in {onnx_dir}. "
+        f"Expected one of: {candidates}"
+    )
+
+
+def _ensure_sessions() -> Tuple[Any, Any, Any]:
+    """Lazy-load and cache ONNX vision+text sessions plus the tokenizer.
+
+    Thread-safe: only one thread runs session init; others wait at the lock.
+    Returns (vision_session, text_session, tokenizer).
+    """
+    global _vision_session, _text_session, _tokenizer, _model_name, device
+
+    if _vision_session is not None and _text_session is not None and _tokenizer is not None:
+        return _vision_session, _text_session, _tokenizer
+
     with _model_lock:
+        if _vision_session is not None and _text_session is not None and _tokenizer is not None:
+            return _vision_session, _text_session, _tokenizer
+
+        # Deferred imports — avoids hard dep at module import time and keeps
+        # core.py importable in environments that only need DB helpers.
+        import onnxruntime as ort  # type: ignore
+        from huggingface_hub import snapshot_download  # type: ignore
+        from tokenizers import Tokenizer  # type: ignore
+
         cfg = config.get_current_level_params()
-        wanted = _resolve_model_name(cfg.get("model", "clip-ViT-L-14"))
-        if _model is None or _model_name != wanted:
-            print(f"Loading CLIP model: {wanted} on device: {device}")
-            _model = SentenceTransformer(wanted, device=device)
-            _model_name = wanted
-        return _model
+        wanted = _resolve_model_name(cfg.get("model", LEGACY_MODEL_NAME))
+
+        providers = platform_utils.get_onnx_providers()
+        print(f"[core] Loading CLIP ONNX ({wanted}) with providers={providers}")
+
+        # Pull the ONNX bundle from HF Hub on first use; cached for subsequent
+        # launches in ~/.cache/huggingface.
+        local_dir = snapshot_download(
+            repo_id=_HF_ONNX_REPO_ID,
+            allow_patterns=[
+                "onnx/vision_model*.onnx",
+                "onnx/text_model*.onnx",
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "preprocessor_config.json",
+                "special_tokens_map.json",
+                "vocab.json",
+                "merges.txt",
+            ],
+        )
+
+        onnx_dir = os.path.join(local_dir, _ONNX_SUBDIR)
+        vision_path, text_path = _pick_onnx_files(onnx_dir)
+
+        sess_opts = ort.SessionOptions()
+        sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+        vs = ort.InferenceSession(vision_path, sess_options=sess_opts, providers=providers)
+        ts = ort.InferenceSession(text_path, sess_options=sess_opts, providers=providers)
+
+        # Reflect the EP actually selected (ORT silently downgrades if e.g.
+        # CUDA libs are missing).
+        active = vs.get_providers()[0] if vs.get_providers() else "CPUExecutionProvider"
+        device = _ep_short_name(active)
+        print(f"[core] CLIP ONNX active EP: {active} ({device})")
+
+        tok_path = os.path.join(local_dir, "tokenizer.json")
+        tok = Tokenizer.from_file(tok_path)
+        # CLIP's HF tokenizer ships with no built-in padding/truncation rules;
+        # apply them explicitly so input_ids is always 1x77 int64.
+        tok.enable_truncation(max_length=_CLIP_CONTEXT_LENGTH)
+        tok.enable_padding(length=_CLIP_CONTEXT_LENGTH, pad_id=0, pad_token="<|endoftext|>")
+
+        _vision_session = vs
+        _text_session = ts
+        _tokenizer = tok
+        _model_name = wanted
+        return vs, ts, tok
 
 
 def get_model_name() -> str:
@@ -86,14 +199,16 @@ def resolve_model_name(requested: str) -> str:
 
 
 def reset_model() -> None:
-    """Drop the cached model so the next get_model() call reloads.
+    """Drop cached ONNX sessions so the next encode call reloads.
 
     Called by /config/level after a level change so the new model (if any) is
     picked up lazily on the next encode request.
     """
-    global _model, _model_name
+    global _vision_session, _text_session, _tokenizer, _model_name
     with _model_lock:
-        _model = None
+        _vision_session = None
+        _text_session = None
+        _tokenizer = None
         _model_name = None
 
 # ---------------------------------------------------------------------------
@@ -357,35 +472,72 @@ def phash_hamming(a: int, b: int) -> int:
 _MAX_ENCODE_CHUNK = 256  # OOM guard: split large batches into chunks of this size
 
 
+def _preprocess_image(img: Image.Image) -> np.ndarray:
+    """CLIP-ViT-L/14 image preprocessing: RGB, center-crop-resize 224, normalize, CHW.
+
+    Matches openai/clip + sentence-transformers/clip-ViT-L-14 exactly so
+    embeddings stay comparable with previously-indexed rows.
+    """
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    # Bicubic resize matching transformers' CLIPImageProcessor default.
+    img = img.resize((_CLIP_IMAGE_SIZE, _CLIP_IMAGE_SIZE), Image.BICUBIC)
+    arr = np.asarray(img, dtype=np.float32) / 255.0  # HWC
+    arr = (arr - _CLIP_MEAN) / _CLIP_STD
+    # HWC -> CHW
+    return np.transpose(arr, (2, 0, 1))
+
+
+def _l2_normalize(v: np.ndarray) -> np.ndarray:
+    """Row-wise L2 normalisation; supports 1-D or 2-D arrays."""
+    if v.ndim == 1:
+        n = float(np.linalg.norm(v))
+        return v if n == 0.0 else (v / n).astype(np.float32, copy=False)
+    norms = np.linalg.norm(v, axis=1, keepdims=True)
+    norms = np.where(norms == 0.0, 1.0, norms)
+    return (v / norms).astype(np.float32, copy=False)
+
+
+def _run_vision(batch: np.ndarray) -> np.ndarray:
+    """Run the vision ONNX session on an Nx3x224x224 float32 batch.
+
+    Returns Nx768 float32 (unnormalized) embeddings.
+    """
+    vs, _ts, _tok = _ensure_sessions()
+    # The vision model expects a single input named "pixel_values" in the
+    # Xenova export. Probe in case a future export renames it.
+    input_name = vs.get_inputs()[0].name
+    # fp16 ONNX models still accept float32 inputs (ORT casts internally).
+    out = vs.run(None, {input_name: batch.astype(np.float32, copy=False)})[0]
+    return np.asarray(out, dtype=np.float32)
+
+
 def encode_images_batch(images: List[Image.Image], batch_size: int = 64) -> List[List[float]]:
     """Encode a list of PIL images; returns list of 768-D float vectors.
 
+    Output is L2-normalized so cosine similarity matches the old
+    sentence-transformers behaviour (which also returned unit vectors after
+    its own normalize step, matching what callers / LanceDB cosine expects).
+
     Internally chunks inputs into at most _MAX_ENCODE_CHUNK images to avoid OOM.
     """
+    if not images:
+        return []
     if len(images) > _MAX_ENCODE_CHUNK:
         result: List[List[float]] = []
         for i in range(0, len(images), _MAX_ENCODE_CHUNK):
             result.extend(encode_images_batch(images[i:i + _MAX_ENCODE_CHUNK], batch_size=batch_size))
         return result
 
-    # fp16 autocast halves VRAM and speeds inference on CUDA without quality loss for retrieval
-    if device == "cuda":
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16):
-            vecs = get_model().encode(
-                images,
-                batch_size=batch_size,
-                convert_to_numpy=True,
-                normalize_embeddings=False,
-            )
-    else:
-        with torch.inference_mode():
-            vecs = get_model().encode(
-                images,
-                batch_size=batch_size,
-                convert_to_numpy=True,
-                normalize_embeddings=False,
-            )
-    return [v.tolist() for v in vecs]
+    all_vecs: List[np.ndarray] = []
+    for i in range(0, len(images), batch_size):
+        chunk = images[i:i + batch_size]
+        batch = np.stack([_preprocess_image(im) for im in chunk], axis=0)
+        vecs = _run_vision(batch)
+        all_vecs.append(vecs)
+    out = np.concatenate(all_vecs, axis=0) if len(all_vecs) > 1 else all_vecs[0]
+    out = _l2_normalize(out)
+    return [row.tolist() for row in out]
 
 
 def encode_image(image: Image.Image) -> List[float]:
@@ -393,17 +545,53 @@ def encode_image(image: Image.Image) -> List[float]:
     return encode_images_batch([image])[0]
 
 
+def _tokenize(texts: List[str]) -> np.ndarray:
+    """Tokenize a list of strings into a 1xN int64 input_ids array (padded to 77)."""
+    _vs, _ts, tok = _ensure_sessions()
+    encs = tok.encode_batch(texts)
+    ids = np.array([e.ids for e in encs], dtype=np.int64)
+    return ids
+
+
+def _run_text(input_ids: np.ndarray) -> np.ndarray:
+    """Run the text ONNX session; returns Nx768 float32 (unnormalized).
+
+    Xenova's text_model export takes input_ids + attention_mask. We derive
+    attention_mask from non-pad positions (pad_id=0 matches the tokenizer
+    config we set in _ensure_sessions).
+    """
+    _vs, ts, _tok = _ensure_sessions()
+    attention_mask = (input_ids != 0).astype(np.int64)
+    feed: Dict[str, np.ndarray] = {}
+    for inp in ts.get_inputs():
+        if inp.name == "input_ids":
+            feed[inp.name] = input_ids
+        elif inp.name == "attention_mask":
+            feed[inp.name] = attention_mask
+    out = ts.run(None, feed)[0]
+    return np.asarray(out, dtype=np.float32)
+
+
 def encode_text(text: str) -> List[float]:
-    """Encode text query to vector using CLIP."""
-    with torch.inference_mode():
-        return get_model().encode(text).tolist()
+    """Encode a single text query to a 768-D L2-normalized vector."""
+    ids = _tokenize([text])
+    vec = _run_text(ids)[0]
+    return _l2_normalize(vec).tolist()
 
 
 def encode_texts_batch(texts: List[str]) -> List[List[float]]:
-    """Encode a list of text strings in one batch; returns list of 768-D float vectors."""
-    with torch.inference_mode():
-        vecs = get_model().encode(texts, convert_to_numpy=True, batch_size=64)
-    return vecs.tolist()
+    """Encode a list of text strings; returns list of 768-D L2-normalized vectors."""
+    if not texts:
+        return []
+    out_chunks: List[np.ndarray] = []
+    batch_size = 64
+    for i in range(0, len(texts), batch_size):
+        chunk = texts[i:i + batch_size]
+        ids = _tokenize(chunk)
+        out_chunks.append(_run_text(ids))
+    arr = np.concatenate(out_chunks, axis=0) if len(out_chunks) > 1 else out_chunks[0]
+    arr = _l2_normalize(arr)
+    return [row.tolist() for row in arr]
 
 
 # ---------------------------------------------------------------------------

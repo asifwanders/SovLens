@@ -1,9 +1,10 @@
-# Audio transcript pipeline. Requires `openai-whisper` (pip install openai-whisper).
+# Audio transcript pipeline. Requires `faster-whisper` (pip install faster-whisper).
 # Stub mode active when not installed.
 #
-# When whisper IS available, this module:
+# When faster-whisper IS available, this module:
 #   1. Extracts 16kHz mono WAV from a video using ffmpeg.
-#   2. Transcribes via Whisper to produce timed text segments.
+#   2. Transcribes via faster-whisper (CTranslate2 engine, no torch) to produce
+#      timed text segments. Silero VAD filter is enabled to skip silence.
 #   3. Embeds each segment's text with the CLIP text encoder already loaded in core.py.
 #   4. Inserts rows into the shared LanceDB "media" table (type="audio_segment").
 #
@@ -13,8 +14,9 @@
 
 import logging
 import os
+import sys
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import platform_utils
 
 logger = logging.getLogger(__name__)
@@ -24,12 +26,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 try:
-    import whisper as _whisper  # type: ignore
+    from faster_whisper import WhisperModel as _WhisperModel  # type: ignore
     WHISPER_AVAILABLE: bool = True
 except ImportError:
+    _WhisperModel = None  # type: ignore
     WHISPER_AVAILABLE = False
 
-_INSTALL_HINT = "Whisper not installed. Run: pip install openai-whisper"
+_INSTALL_HINT = "faster-whisper not installed. Run: pip install faster-whisper"
 
 # ---------------------------------------------------------------------------
 # Lazy whisper model cache
@@ -40,19 +43,52 @@ _whisper_model_name: str = ""
 _whisper_load_lock = threading.Lock()
 
 
-def _get_whisper_model(name: str = "base"):
-    """Return a cached Whisper model, loading it on first call.
+def _detect_device() -> Tuple[str, str]:
+    """Pick (device, compute_type) for faster-whisper without importing torch.
 
-    Uses platform_utils.WHISPER_DEVICE which excludes MPS (Whisper correctness
-    issues on Apple MPS) and picks CUDA when available.
-    Thread-safe via double-checked locking: avoids redundant loads under concurrency.
+    - mac: CPU + int8 (no MPS support in CTranslate2)
+    - windows/linux + CUDA: cuda + float16
+    - else: CPU + int8
+
+    CUDA presence is probed via ctranslate2.get_cuda_device_count(), so we
+    don't pull torch into this module.
+    """
+    if sys.platform == "darwin":
+        return ("cpu", "int8")
+    try:
+        import ctranslate2  # type: ignore
+        if ctranslate2.get_cuda_device_count() > 0:
+            return ("cuda", "float16")
+    except Exception as exc:
+        logger.debug("ctranslate2 CUDA probe failed: %s", exc)
+    return ("cpu", "int8")
+
+
+def _get_whisper_model(name: str = "base"):
+    """Return a cached faster-whisper WhisperModel, loading on first call.
+
+    Device/compute_type are picked by _detect_device():
+      - mac → cpu/int8 (no MPS)
+      - cuda available → cuda/float16
+      - else → cpu/int8
+
+    Thread-safe via double-checked locking. faster-whisper sessions are not
+    safe for concurrent .transcribe(), but ingestion serializes audio passes,
+    so a single cached instance is sufficient.
     """
     global _whisper_model, _whisper_model_name
+    if not WHISPER_AVAILABLE:
+        raise NotImplementedError(_INSTALL_HINT)
     if _whisper_model is None or _whisper_model_name != name:
         with _whisper_load_lock:
             # Re-check inside lock to handle concurrent first callers
             if _whisper_model is None or _whisper_model_name != name:
-                _whisper_model = _whisper.load_model(name, device=platform_utils.WHISPER_DEVICE)
+                device, compute_type = _detect_device()
+                logger.info(
+                    "Loading faster-whisper model name=%s device=%s compute_type=%s",
+                    name, device, compute_type,
+                )
+                _whisper_model = _WhisperModel(name, device=device, compute_type=compute_type)
                 _whisper_model_name = name
     return _whisper_model
 
@@ -74,7 +110,7 @@ def extract_audio(video_path: str, out_wav: str) -> bool:
         True on success, False if ffmpeg is unavailable or the extraction fails.
 
     Raises:
-        NotImplementedError: When ``openai-whisper`` is not installed, because
+        NotImplementedError: When ``faster-whisper`` is not installed, because
             audio extraction is only useful when transcription is also possible.
     """
     if not WHISPER_AVAILABLE:
@@ -102,31 +138,35 @@ def extract_audio(video_path: str, out_wav: str) -> bool:
 
 
 def transcribe(wav_path: str, model_name: str = "base") -> List[Dict[str, Any]]:
-    """Transcribe *wav_path* with Whisper and return timed segment dicts.
+    """Transcribe *wav_path* with faster-whisper and return timed segment dicts.
 
     Args:
         wav_path: Path to a 16 kHz mono WAV file.
-        model_name: Whisper model size ("tiny", "base", "small", "medium", "large").
-            "base" gives a good speed/accuracy trade-off for most use cases.
+        model_name: Whisper model size ("tiny", "base", "small", "medium",
+            "large-v3"). faster-whisper auto-downloads from HF
+            ``Systran/faster-whisper-<size>`` on first use.
 
     Returns:
         List of dicts: ``{"text": str, "start": float, "end": float}``.
         Returns an empty list if transcription produces no segments.
 
     Raises:
-        NotImplementedError: When ``openai-whisper`` is not installed.
+        NotImplementedError: When ``faster-whisper`` is not installed.
     """
     if not WHISPER_AVAILABLE:
         raise NotImplementedError(_INSTALL_HINT)
 
     model = _get_whisper_model(model_name)
-    result = model.transcribe(wav_path, fp16=False)
-    segments = result.get("segments", [])
-    return [
-        {"text": seg["text"].strip(), "start": float(seg["start"]), "end": float(seg["end"])}
-        for seg in segments
-        if seg.get("text", "").strip()
-    ]
+    # faster-whisper returns (segments_iterator, info). Iterator is lazy —
+    # iterate fully to materialize results.
+    segments_iter, _info = model.transcribe(wav_path, beam_size=5, vad_filter=True)
+    out: List[Dict[str, Any]] = []
+    for seg in segments_iter:
+        text = (seg.text or "").strip()
+        if not text:
+            continue
+        out.append({"text": text, "start": float(seg.start), "end": float(seg.end)})
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +197,7 @@ def process_video_audio(video_path: str, video_id: str, model_name: Optional[str
         Number of segments successfully inserted (0 on any failure).
 
     Raises:
-        NotImplementedError: When ``openai-whisper`` is not installed.
+        NotImplementedError: When ``faster-whisper`` is not installed.
     """
     if not WHISPER_AVAILABLE:
         raise NotImplementedError(_INSTALL_HINT)

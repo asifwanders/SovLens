@@ -12,14 +12,15 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 block_cipher = None
 
-# Torch + adjacent: use collect_all so every lazy submodule, data file,
-# and native DLL is bundled. Hand-listing reliably misses things like
-# torch._dynamo, torch.distributed.config, MKL DLLs on Win, etc.
+# ONNX Runtime stack — use collect_all so every lazy submodule, data file,
+# and native DLL/.so/.dylib is bundled. Hand-listing reliably misses things
+# like ort's CoreML/DirectML EP shared libs, ctranslate2's runtime libs,
+# rapidocr's bundled ONNX model files, and huggingface_hub's cache helpers.
 # Wrap each in try/except so a single missing/broken hook can't sink the
 # whole build silently — PyInstaller would otherwise crash mid-spec and
 # leave dist/ empty, which build.bat would then fail loudly on.
 # Track every failed collect_all() so we can hard-fail the build at the
-# bottom of this spec. A swallowed failure (broken hook, torch version skew)
+# bottom of this spec. A swallowed failure (broken hook, version skew)
 # previously yielded a binary missing critical DLLs that still passed the
 # 10MB build.bat size guard. Override only via env SOVLENS_ALLOW_PARTIAL_COLLECT=1.
 _COLLECT_FAILURES = []
@@ -32,13 +33,12 @@ def _safe_collect(name):
         _COLLECT_FAILURES.append((name, repr(exc)))
         return ([], [], [])
 
-torch_datas, torch_binaries, torch_hidden = _safe_collect("torch")
-tv_datas, tv_binaries, tv_hidden = _safe_collect("torchvision")
-tr_datas, tr_binaries, tr_hidden = _safe_collect("transformers")
-st_datas, st_binaries, st_hidden = _safe_collect("sentence_transformers")
-ul_datas, ul_binaries, ul_hidden = _safe_collect("ultralytics")
-eo_datas, eo_binaries, eo_hidden = _safe_collect("easyocr")
-wh_datas, wh_binaries, wh_hidden = _safe_collect("whisper")
+ort_datas, ort_binaries, ort_hidden = _safe_collect("onnxruntime")
+fw_datas, fw_binaries, fw_hidden = _safe_collect("faster_whisper")
+ct_datas, ct_binaries, ct_hidden = _safe_collect("ctranslate2")
+ro_datas, ro_binaries, ro_hidden = _safe_collect("rapidocr_onnxruntime")
+hh_datas, hh_binaries, hh_hidden = _safe_collect("huggingface_hub")
+tk_datas, tk_binaries, tk_hidden = _safe_collect("tokenizers")
 ld_datas, ld_binaries, ld_hidden = _safe_collect("lancedb")
 sd_datas, sd_binaries, sd_hidden = _safe_collect("scenedetect")
 ff_datas, ff_binaries, ff_hidden = _safe_collect("imageio_ffmpeg")
@@ -62,7 +62,18 @@ HIDDEN_IMPORTS = [
     "pyarrow._csv",
     "pyarrow._json",
     "pyarrow._parquet",
-    # tokenizers (transformers picked up via collect_all)
+    # ONNX Runtime — capi is the C extension loaded lazily.
+    "onnxruntime",
+    "onnxruntime.capi",
+    "onnxruntime.capi._pybind_state",
+    # faster-whisper + CTranslate2
+    "faster_whisper",
+    "ctranslate2",
+    # RapidOCR (ships ONNX models internally)
+    "rapidocr_onnxruntime",
+    # HuggingFace hub (model download for CLIP ONNX bundle)
+    "huggingface_hub",
+    # Tokenizers (CLIP text encoder)
     "tokenizers",
     # imageio / ffmpeg
     "imageio_ffmpeg",
@@ -87,9 +98,6 @@ HIDDEN_IMPORTS = [
     # OpenCV (headless)
     "cv2",
     "numpy",
-    # Scipy
-    "scipy",
-    "scipy.spatial.transform._rotation_groups",
     # ASGI / HTTP
     "anyio",
     "anyio._backends._asyncio",
@@ -97,8 +105,8 @@ HIDDEN_IMPORTS = [
     "starlette.middleware.cors",
     "multipart",
     "httpx",
-    # Stdlib modules PyInstaller's modulegraph marks "conditional" but
-    # torch/transformers/ultralytics actually import. Force-include.
+    # Stdlib modules PyInstaller's modulegraph marks "conditional" but some
+    # transitive deps actually import. Force-include defensively.
     "unittest",
     "unittest.mock",
     "unittest.case",
@@ -117,20 +125,20 @@ HIDDEN_IMPORTS = [
     "shelve",
     "email.mime.multipart",
     "email.mime.text",
-] + torch_hidden + tv_hidden + tr_hidden + st_hidden + ul_hidden + eo_hidden + wh_hidden + ld_hidden + sd_hidden + ff_hidden
+] + ort_hidden + fw_hidden + ct_hidden + ro_hidden + hh_hidden + tk_hidden + ld_hidden + sd_hidden + ff_hidden
 
 a = Analysis(
     # Entry point — relative to spec file location (backend/).
     ["main.py"],
     pathex=[],
     binaries=(
-        torch_binaries + tv_binaries + tr_binaries + st_binaries
-        + ul_binaries + eo_binaries + wh_binaries + ld_binaries + sd_binaries
+        ort_binaries + fw_binaries + ct_binaries + ro_binaries
+        + hh_binaries + tk_binaries + ld_binaries + sd_binaries
         + ff_binaries
     ),
     datas=(
-        torch_datas + tv_datas + tr_datas + st_datas
-        + ul_datas + eo_datas + wh_datas + ld_datas + sd_datas
+        ort_datas + fw_datas + ct_datas + ro_datas
+        + hh_datas + tk_datas + ld_datas + sd_datas
         + ff_datas
     ),
     hiddenimports=HIDDEN_IMPORTS,
@@ -139,8 +147,8 @@ a = Analysis(
     runtime_hooks=[],
     excludes=[
         # Keep the bundle lean — tests and scratch are never needed at runtime.
-        # CRITICAL: do NOT exclude "unittest" — torch.utils._config_module
-        # imports it at module load and the frozen exe will crash on start.
+        # Also exclude any straggling torch/transformers/ultralytics that may
+        # land in the venv via dev tools; they are not used at runtime now.
         "tests",
         "scratch",
         "pytest",
@@ -149,6 +157,14 @@ a = Analysis(
         "notebook",
         "matplotlib",
         "tkinter",
+        "torch",
+        "torchvision",
+        "transformers",
+        "sentence_transformers",
+        "ultralytics",
+        "easyocr",
+        "whisper",  # legacy openai-whisper — replaced by faster-whisper
+        "scipy",
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -162,7 +178,7 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 # onedir mode (exclude_binaries=True + COLLECT).
 #
 # Why onedir over onefile:
-#   * Onefile produces a single ~1 GB EXE that NSIS must mmap to embed.
+#   * Onefile produces a single large EXE that NSIS must mmap to embed.
 #     On Windows-latest CI this fails ("failed creating mmap of ...
 #     sovlens-backend.exe", os error 2) intermittently even with
 #     Defender exclusions — the file is just too large and AV scan
@@ -187,8 +203,8 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    # upx=True triggers Windows Defender heuristic + corrupts some torch
-    # DLLs on Win. Net <5% size gain; disabled.
+    # upx=True triggers Windows Defender heuristic + can corrupt native
+    # DLLs. Net <5% size gain; disabled.
     upx=False,
     upx_exclude=[],
     # console=False suppresses the terminal popup on Windows.

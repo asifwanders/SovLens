@@ -102,13 +102,14 @@ def normalize_path(p: str) -> str:
 # ---------------------------------------------------------------------------
 
 def detect_torch_device() -> str:
-    """Return 'cuda', 'mps', or 'cpu' based on available torch backends.
+    """_legacy_ — return 'cuda', 'mps', or 'cpu' based on available torch backends.
 
-    Importing torch is deferred so this module loads even without torch installed.
-    Falls back to 'cpu' on ImportError.
+    Kept for backward compatibility with any out-of-tree callers. The SovLens
+    backend no longer ships torch, so this almost always returns 'cpu' inside
+    the frozen sidecar. New code should use ``get_onnx_providers()`` instead.
     """
     try:
-        import torch
+        import torch  # type: ignore
         if torch.cuda.is_available():
             return "cuda"
         if torch.backends.mps.is_available():
@@ -118,8 +119,40 @@ def detect_torch_device() -> str:
     return "cpu"
 
 
-# Whisper never uses MPS (known correctness issues).
-WHISPER_DEVICE: str = "cuda" if detect_torch_device() == "cuda" else "cpu"
+def get_onnx_providers() -> List[str]:
+    """Return the ONNX Runtime execution provider list in priority order.
+
+    Filtered against what the local `onnxruntime` build actually exposes via
+    `get_available_providers()`. Falls back to `["CPUExecutionProvider"]` if
+    nothing else is available (should never happen — CPU EP is always present).
+
+    Priority by platform:
+      * macOS   : CoreML, CPU
+      * Windows : CUDA, DirectML, CPU
+      * Linux   : CUDA, CPU
+
+    onnxruntime import is deferred so this module still loads if the package
+    is missing (caller will hit ImportError when actually trying to use ORT).
+    """
+    if IS_MACOS:
+        preferred = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    elif IS_WINDOWS:
+        preferred = ["CUDAExecutionProvider", "DmlExecutionProvider", "CPUExecutionProvider"]
+    else:
+        preferred = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+    try:
+        import onnxruntime as ort  # type: ignore
+        available = set(ort.get_available_providers())
+    except Exception:
+        available = set()
+
+    final = [p for p in preferred if p in available]
+    if not final:
+        # CPU EP always ships with onnxruntime; if it's somehow missing the
+        # caller will fail at session creation with a clear message.
+        return ["CPUExecutionProvider"]
+    return final
 
 
 # ---------------------------------------------------------------------------

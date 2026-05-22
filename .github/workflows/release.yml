@@ -73,11 +73,11 @@ jobs:
           pip install --retries 5 --timeout 60 -c constraints.txt -r requirements.txt
           pip install --retries 5 --timeout 60 -c constraints.txt -r requirements-build.txt
 
-      - name: Verify torch
+      - name: Verify ONNX Runtime
         working-directory: backend
         run: |
           source venv/bin/activate
-          python -c "import torch; print('torch=', torch.__version__, 'mps=', torch.backends.mps.is_available())"
+          python -c "import onnxruntime as ort; print('ort=', ort.__version__, 'providers=', ort.get_available_providers())"
 
       - name: Build backend sidecar
         run: bash frontend/src-tauri/binaries/build.sh
@@ -92,10 +92,11 @@ jobs:
           if [ ! -f "$BIN" ]; then echo "::error::No bootloader exe at $BIN" && exit 1; fi
           xattr -dr com.apple.quarantine "$DIR" || true
           # Aggregate-size check — bootloader EXE itself is tiny in onedir;
-          # the bulk lives in _internal/.
+          # the bulk lives in _internal/. With the ONNX-only stack the dir
+          # is ~150-250MB so the threshold drops from 200MB to 80MB.
           SIZE=$(du -sk "$DIR" | awk '{print $1 * 1024}')
           echo "sidecar dir size: $SIZE bytes"
-          if [ "$SIZE" -lt 200000000 ]; then echo "::error::sidecar dir <200MB" && exit 1; fi
+          if [ "$SIZE" -lt 80000000 ]; then echo "::error::sidecar dir <80MB" && exit 1; fi
 
       - name: Upload PyInstaller warnings
         if: always()
@@ -193,11 +194,11 @@ jobs:
           pip install --retries 5 --timeout 60 -c constraints.txt -r requirements.txt
           pip install --retries 5 --timeout 60 -c constraints.txt -r requirements-build.txt
 
-      - name: Verify torch
+      - name: Verify ONNX Runtime
         working-directory: backend
         run: |
           source venv/bin/activate
-          python -c "import torch; print('torch=', torch.__version__, 'mps=', torch.backends.mps.is_available())"
+          python -c "import onnxruntime as ort; print('ort=', ort.__version__, 'providers=', ort.get_available_providers())"
 
       - name: Build backend sidecar
         run: bash frontend/src-tauri/binaries/build.sh
@@ -211,11 +212,10 @@ jobs:
           if [ ! -d "$DIR" ]; then echo "::error::No sidecar dir at $DIR" && exit 1; fi
           if [ ! -f "$BIN" ]; then echo "::error::No bootloader exe at $BIN" && exit 1; fi
           xattr -dr com.apple.quarantine "$DIR" || true
-          # Aggregate-size check — bootloader EXE itself is tiny in onedir;
-          # the bulk lives in _internal/.
+          # Aggregate-size check — see arm job comment.
           SIZE=$(du -sk "$DIR" | awk '{print $1 * 1024}')
           echo "sidecar dir size: $SIZE bytes"
-          if [ "$SIZE" -lt 200000000 ]; then echo "::error::sidecar dir <200MB" && exit 1; fi
+          if [ "$SIZE" -lt 80000000 ]; then echo "::error::sidecar dir <80MB" && exit 1; fi
 
       - name: Upload PyInstaller warnings
         if: always()
@@ -328,16 +328,7 @@ jobs:
         shell: pwsh
         run: python -m venv venv
 
-      # CUDA torch must be installed BEFORE the rest of requirements
-      # so pip doesn't pull the CPU-only wheel transitively.
-      - name: Install CUDA torch (Windows)
-        working-directory: backend
-        shell: pwsh
-        run: |
-          .\venv\Scripts\Activate.ps1
-          pip install --retries 5 --timeout 60 torch --index-url https://download.pytorch.org/whl/cu121
-
-      - name: Install remaining Python deps + PyInstaller
+      - name: Install Python deps + PyInstaller
         working-directory: backend
         shell: pwsh
         run: |
@@ -346,20 +337,17 @@ jobs:
           pip install --retries 5 --timeout 60 -c constraints.txt -r requirements.txt
           pip install --retries 5 --timeout 60 -c constraints.txt -r requirements-build.txt
 
-      # Re-pin the cu121 torch wheel AFTER the main requirements install.
-      # pip's resolver will happily downgrade torch to the PyPI CPU wheel
-      # when a transitive dep (sentence-transformers / ultralytics / etc.)
-      # asks for a plain `torch` without the +cu121 local-version tag.
-      # --force-reinstall --no-deps puts the CUDA wheel back without
-      # touching anything else. Hard-fail the build if the CPU wheel
-      # somehow survived.
-      - name: Re-pin CUDA torch + verify
+      # ONNX Runtime ships its own CUDA / DirectML EPs as wheels (no CUDA
+      # toolkit install needed on the runner). On Windows we install
+      # onnxruntime-directml from requirements.txt so DmlExecutionProvider
+      # is always present; the marker in requirements.txt selects the right
+      # wheel per platform. Verify ORT loads cleanly + log providers.
+      - name: Verify ONNX Runtime
         working-directory: backend
         shell: pwsh
         run: |
           .\venv\Scripts\Activate.ps1
-          pip install --retries 5 --timeout 60 --force-reinstall --no-deps torch --index-url https://download.pytorch.org/whl/cu121
-          python -c "import torch,sys; assert torch.version.cuda, f'CPU torch wheel leaked into build: {torch.__version__}'; print('torch=', torch.__version__, 'cuda=', torch.version.cuda, 'is_available=', torch.cuda.is_available())"
+          python -c "import onnxruntime as ort; print('ort=', ort.__version__, 'providers=', ort.get_available_providers())"
 
       - name: Free disk space
         shell: pwsh
