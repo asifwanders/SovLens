@@ -91,7 +91,31 @@ fn read_recent_logs(max_bytes: usize) -> Result<String, String> {
     Ok(out)
 }
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Extract the sidecar archive (zip on Windows, tar.gz elsewhere) into `dest`.
+/// `dest` should be the parent directory; the archive root entry is
+/// `sovlens-backend/` so the bootloader ends up at `<dest>/sovlens-backend/…`.
+#[cfg(target_os = "windows")]
+fn extract_sidecar(archive: &Path, dest: &Path) -> Result<(), String> {
+    let file = std::fs::File::open(archive)
+        .map_err(|e| format!("open archive {}: {}", archive.display(), e))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("zip open: {}", e))?;
+    zip.extract(dest).map_err(|e| format!("zip extract: {}", e))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn extract_sidecar(archive: &Path, dest: &Path) -> Result<(), String> {
+    let file = std::fs::File::open(archive)
+        .map_err(|e| format!("open archive {}: {}", archive.display(), e))?;
+    let gz = flate2::read::GzDecoder::new(file);
+    let mut ar = tar::Archive::new(gz);
+    // Preserve permissions so the bootloader keeps its +x bit; we also
+    // chmod 0755 defensively after extraction in case the archive was
+    // produced on a host with a different umask.
+    ar.set_preserve_permissions(true);
+    ar.unpack(dest).map_err(|e| format!("tar unpack: {}", e))
+}
 
 #[tauri::command]
 fn copy_media_to_clipboard(path: String) -> Result<(), String> {
@@ -285,16 +309,87 @@ pub fn run() {
                     "sovlens-backend"
                 };
 
-                let resolved = app.path()
-                    .resolve(format!("sovlens-backend/{}", exe_name),
+                // Archive ships as a single bundle resource at:
+                //   <resource_dir>/binaries/sovlens-backend.tar.gz   (mac/linux)
+                //   <resource_dir>/binaries/sovlens-backend.zip      (windows)
+                // We extract on first launch into the per-user app-data dir
+                // (writable under Win NSIS currentUser install), tagging the
+                // extracted tree with a `.sidecar-version` file matching
+                // CARGO_PKG_VERSION so app upgrades trigger a re-extract.
+                let archive_name = if cfg!(target_os = "windows") {
+                    "sovlens-backend.zip"
+                } else {
+                    "sovlens-backend.tar.gz"
+                };
+
+                let archive_resolved = app.path()
+                    .resolve(format!("binaries/{}", archive_name),
                              tauri::path::BaseDirectory::Resource);
+
+                // Per-user writable extract root: <app_data>/sidecar/
+                // Using app_data_dir (not cache_dir) so that on Win NSIS
+                // currentUser installs the bundle resource and extracted
+                // tree share an ownership context. We never extract into
+                // the Tauri resource dir itself — that lives under the
+                // app bundle / Program Files and is read-only.
+                let extract_root: Result<PathBuf, String> = app.path()
+                    .app_data_dir()
+                    .map(|p| p.join("sidecar"))
+                    .map_err(|e| e.to_string());
+
+                let expected_version = env!("CARGO_PKG_VERSION");
+                let resolved: Result<PathBuf, String> = (|| -> Result<PathBuf, String> {
+                    let archive_path = archive_resolved.map_err(|e| e.to_string())?;
+                    let root = extract_root?;
+                    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+
+                    let version_stamp = root.join(".sidecar-version");
+                    let exe_path = root.join("sovlens-backend").join(exe_name);
+
+                    let stamp_matches = std::fs::read_to_string(&version_stamp)
+                        .map(|s| s.trim() == expected_version)
+                        .unwrap_or(false);
+
+                    if !stamp_matches || !exe_path.exists() {
+                        // Wipe any previous extract so a partial layout
+                        // from a crashed prior unpack doesn't bleed in.
+                        let old_dir = root.join("sovlens-backend");
+                        if old_dir.exists() {
+                            let _ = std::fs::remove_dir_all(&old_dir);
+                        }
+                        let _ = std::fs::remove_file(&version_stamp);
+
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true).append(true).open(&backend_log)
+                        {
+                            let _ = writeln!(
+                                f,
+                                "[{}] BOOT extracting sidecar {} -> {}",
+                                chrono::Utc::now().to_rfc3339(),
+                                archive_path.display(),
+                                root.display()
+                            );
+                        }
+                        extract_sidecar(&archive_path, &root)?;
+                        std::fs::write(&version_stamp, expected_version)
+                            .map_err(|e| format!("write version stamp: {}", e))?;
+                    }
+
+                    if !exe_path.exists() {
+                        return Err(format!(
+                            "bootloader missing after extract: {}",
+                            exe_path.display()
+                        ));
+                    }
+                    Ok(exe_path)
+                })();
 
                 match resolved {
                     Ok(exe_path) => {
                         // Ensure the bootloader is executable on Unix.
-                        // Tauri's bundle.resources doesn't always preserve
-                        // the +x bit; setting it idempotently is cheap and
-                        // makes the spawn robust across mac/linux packagers.
+                        // tar crate preserves perms when set, but be
+                        // defensive — some hosts strip the +x bit and a
+                        // broken bootloader spawn is a silent boot failure.
                         #[cfg(unix)]
                         {
                             use std::os::unix::fs::PermissionsExt;
@@ -405,7 +500,7 @@ pub fn run() {
                         {
                             let _ = writeln!(
                                 f,
-                                "[{}] ERR resource path resolve failed: {}",
+                                "[{}] ERR sidecar archive extract / resolve failed: {}",
                                 chrono::Utc::now().to_rfc3339(),
                                 e
                             );

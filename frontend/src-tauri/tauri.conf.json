@@ -38,9 +38,10 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": {
-      "binaries/sovlens-backend/**/*": "sovlens-backend/"
-    },
+    "resources": [
+      "binaries/sovlens-backend.tar.gz",
+      "binaries/sovlens-backend.zip"
+    ],
     "windows": {
       "nsis": {
         "installMode": "currentUser",

@@ -33,6 +33,14 @@ arboard = "3"
 image = "0.25"
 dirs = "5"
 chrono = "0.4"
+# Sidecar archive extraction. Onedir PyInstaller output ships as a single
+# .tar.gz (mac/linux) or .zip (win) bundle resource and is unpacked into
+# the app-data dir on first launch (or after upgrade).
+zip = { version = "2.0", default-features = false, features = ["deflate"] }
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+tar = "0.4"
+flate2 = "1.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 clipboard-win = "5"

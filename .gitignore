@@ -49,6 +49,8 @@ backend/.EasyOCR/
 # Built per-platform by CI; never commit blobs
 frontend/src-tauri/binaries/sovlens-backend-*
 frontend/src-tauri/binaries/sovlens-backend/
+frontend/src-tauri/binaries/sovlens-backend.tar.gz
+frontend/src-tauri/binaries/sovlens-backend.zip
 !frontend/src-tauri/binaries/README.md
 !frontend/src-tauri/binaries/build.sh
 !frontend/src-tauri/binaries/build.bat

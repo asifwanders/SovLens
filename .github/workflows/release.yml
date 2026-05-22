@@ -82,21 +82,21 @@ jobs:
       - name: Build backend sidecar
         run: bash frontend/src-tauri/binaries/build.sh
 
-      - name: Strip quarantine + size verify (macOS)
+      - name: Verify sidecar tarball (macOS)
         run: |
           set -euo pipefail
-          # Onedir layout: frontend/src-tauri/binaries/sovlens-backend/{sovlens-backend, _internal/...}
-          DIR="frontend/src-tauri/binaries/sovlens-backend"
-          BIN="$DIR/sovlens-backend"
-          if [ ! -d "$DIR" ]; then echo "::error::No sidecar dir at $DIR" && exit 1; fi
-          if [ ! -f "$BIN" ]; then echo "::error::No bootloader exe at $BIN" && exit 1; fi
-          xattr -dr com.apple.quarantine "$DIR" || true
-          # Aggregate-size check — bootloader EXE itself is tiny in onedir;
-          # the bulk lives in _internal/. With the ONNX-only stack the dir
-          # is ~150-250MB so the threshold drops from 200MB to 80MB.
-          SIZE=$(du -sk "$DIR" | awk '{print $1 * 1024}')
-          echo "sidecar dir size: $SIZE bytes"
-          if [ "$SIZE" -lt 80000000 ]; then echo "::error::sidecar dir <80MB" && exit 1; fi
+          # Sidecar now ships as a single tarball that the Rust shell
+          # extracts on first launch (sidesteps Tauri's resource walker
+          # choking on PyInstaller symlink farms — see build.sh header).
+          TARBALL="frontend/src-tauri/binaries/sovlens-backend.tar.gz"
+          if [ ! -f "$TARBALL" ]; then echo "::error::No sidecar tarball at $TARBALL" && exit 1; fi
+          xattr -d com.apple.quarantine "$TARBALL" 2>/dev/null || true
+          # Compressed tarball size guard. PyInstaller onedir is ~150-250MB
+          # raw; gzip lands ~80-130MB compressed. Floor at 80MB so an
+          # empty/partial PyInstaller build can't slip through.
+          SIZE=$(stat -f%z "$TARBALL" 2>/dev/null || stat -c%s "$TARBALL")
+          echo "sidecar tarball size: $SIZE bytes (compressed)"
+          if [ "$SIZE" -lt 80000000 ]; then echo "::error::sidecar tarball <80MB compressed" && exit 1; fi
 
       - name: Upload PyInstaller warnings
         if: always()
@@ -362,6 +362,21 @@ jobs:
       - name: Build backend sidecar
         shell: cmd
         run: frontend\src-tauri\binaries\build.bat
+
+      - name: Verify sidecar archive (Windows)
+        shell: pwsh
+        run: |
+          $archive = "frontend\src-tauri\binaries\sovlens-backend.zip"
+          if (-not (Test-Path $archive)) {
+            Write-Error "::error::No sidecar archive at $archive"
+            exit 1
+          }
+          $size = (Get-Item $archive).Length
+          Write-Host "sidecar archive size: $size bytes (compressed)"
+          if ($size -lt 80000000) {
+            Write-Error "::error::sidecar archive <80MB compressed"
+            exit 1
+          }
 
       - name: Upload PyInstaller warnings
         if: always()

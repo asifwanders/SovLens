@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Build the sovlens-backend sidecar (onedir) for the current macOS/Linux platform.
+# Build the sovlens-backend sidecar (onedir) for the current macOS/Linux platform,
+# then pack the onedir into a single tarball that ships as a bundle resource.
 # Run from the repository root:
 #   bash frontend/src-tauri/binaries/build.sh
 #
-# Onedir vs onefile: see comments in backend/sovlens-backend.spec. Short
-# version: onefile produced a ~1 GB EXE that NSIS could not mmap on Win CI.
-# Onedir splits into many smaller files. The whole folder ships via
-# bundle.resources in tauri.conf.json and is launched manually from Rust.
+# Why a tarball: Tauri's bundle.resources walks the tree and re-registers every
+# file. PyInstaller onedir contains PIL/.dylibs + torch/.dylibs symlink farms,
+# and even with `cp -RL` to dereference, the resource pass kept failing with
+# `File exists (os error 17)` due to duplicate registrations. A single archive
+# file sidesteps the entire walker problem; the Rust shell extracts it once on
+# first launch into the user's app-data dir.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -15,10 +18,6 @@ BINARIES_DIR="${REPO_ROOT}/frontend/src-tauri/binaries"
 VENV_DIR="${BACKEND_DIR}/venv"
 
 TARGET_TRIPLE=$(rustc -Vv | grep host | cut -d' ' -f2)
-# Onedir is shipped via bundle.resources (not externalBin), so we no longer
-# need Tauri's target-triple suffix convention. A stable folder name keeps
-# tauri.conf.json's resources glob simple and per-runner-portable.
-DEST_DIR_NAME="sovlens-backend"
 
 echo "==> Target triple: ${TARGET_TRIPLE}"
 echo "==> Activating venv at ${VENV_DIR}"
@@ -36,7 +35,7 @@ cd "${REPO_ROOT}"
 # PyInstaller onedir output: dist/sovlens-backend/{sovlens-backend, _internal/...}
 SRC_DIR="${BACKEND_DIR}/dist/sovlens-backend"
 SRC_EXE="${SRC_DIR}/sovlens-backend"
-DST_DIR="${BINARIES_DIR}/${DEST_DIR_NAME}"
+TARBALL="${BINARIES_DIR}/sovlens-backend.tar.gz"
 
 if [[ ! -d "${SRC_DIR}" ]]; then
     echo "ERROR: Expected onedir output not found at ${SRC_DIR}" >&2
@@ -47,25 +46,29 @@ if [[ ! -f "${SRC_EXE}" ]]; then
     exit 1
 fi
 
-# Replace destination atomically: rm first so leftover stale files from a
-# previous build don't linger and bloat the bundle / get out of sync.
-rm -rf "${DST_DIR}"
-mkdir -p "${DST_DIR}"
-# -RL: recurse + DEREFERENCE all symlinks. PyInstaller onedir on macOS
-# includes PIL/.dylibs/ and torch/.dylibs/ symlink farms (libXau.6.dylib
-# -> libXau.dylib etc). Tauri's build script chokes registering each as
-# `rerun-if-changed` because the resolved target ends up registered twice.
-# Dereferencing duplicates real files into the destination (~30-80 MB
-# larger) but eliminates the symlink confusion entirely.
-cp -RL "${SRC_DIR}/." "${DST_DIR}/"
-chmod +x "${DST_DIR}/sovlens-backend"
+mkdir -p "${BINARIES_DIR}"
 
-# Total-folder size guard. The onedir output is many files; the loader EXE
-# itself is tiny (~1-2 MB on Unix). We guard the aggregate to catch a
-# broken build that produced an empty/partial _internal/.
-total_size=$(du -sk "${DST_DIR}" | awk '{print $1 * 1024}')
-echo "==> Wrote: ${DST_DIR} (${total_size} bytes total)"
-if [ "${total_size}" -lt 200000000 ]; then
-    echo "ERROR: sidecar onedir suspiciously small (<200 MB total)" >&2
+# Pack the onedir into a single gzipped tar.
+# `-h` dereferences symlinks so PIL/.dylibs + torch/.dylibs symlink farms become
+# real files inside the archive — eliminates double-extraction collisions on
+# the consumer side and matches what `cp -RL` used to do at copy time.
+echo "==> Packing tarball: ${TARBALL}"
+rm -f "${TARBALL}"
+cd "${BACKEND_DIR}/dist"
+tar -chzf "${TARBALL}" sovlens-backend
+cd "${REPO_ROOT}"
+
+if [[ ! -f "${TARBALL}" ]]; then
+    echo "ERROR: tarball not produced at ${TARBALL}" >&2
+    exit 1
+fi
+
+# Aggregate-size guard on the COMPRESSED tarball. Onedir is ~150-250 MB raw;
+# gzip compresses ~30-50%, so the tarball lands ~80-130 MB. We guard at 80 MB
+# so a broken (empty/partial) PyInstaller build can't slip through.
+tarball_size=$(stat -f%z "${TARBALL}" 2>/dev/null || stat -c%s "${TARBALL}")
+echo "==> Wrote: ${TARBALL} (${tarball_size} bytes compressed)"
+if [ "${tarball_size}" -lt 80000000 ]; then
+    echo "ERROR: sidecar tarball suspiciously small (<80 MB compressed)" >&2
     exit 1
 fi

@@ -1,12 +1,12 @@
 @echo off
-REM Build the sovlens-backend sidecar (onedir) for Windows x86_64.
+REM Build the sovlens-backend sidecar (onedir) for Windows x86_64, then pack
+REM into a single zip that ships as a bundle resource.
 REM Run from the repository root:
 REM   frontend\src-tauri\binaries\build.bat
 REM
-REM Onedir vs onefile: see comments in backend\sovlens-backend.spec. Short
-REM version: onefile produced a ~1 GB EXE that NSIS could not mmap on
-REM windows-latest CI. Onedir splits into many smaller files; NSIS handles
-REM them via individual File directives without the mmap wall.
+REM Why a zip: see build.sh header. Tauri's bundle.resources walker chokes on
+REM PyInstaller's symlink farms / nested onedir; a single archive shipped as
+REM a resource sidesteps it and the Rust shell extracts on first launch.
 
 setlocal EnableDelayedExpansion
 
@@ -20,11 +20,9 @@ set "BACKEND_DIR=%REPO_ROOT%\backend"
 set "BINARIES_DIR=%REPO_ROOT%\frontend\src-tauri\binaries"
 set "VENV_DIR=%BACKEND_DIR%\venv"
 
-REM Resolve target triple (informational only — onedir ships via
-REM bundle.resources, not externalBin, so we no longer need the
-REM triple suffix on the destination folder).
+REM Resolve target triple (informational only — archive ships via
+REM bundle.resources, not externalBin).
 for /f "tokens=2" %%T in ('rustc -Vv ^| findstr /C:"host"') do set "TARGET_TRIPLE=%%T"
-set "DEST_DIR_NAME=sovlens-backend"
 
 echo =^> Target triple: %TARGET_TRIPLE%
 echo =^> Activating venv at %VENV_DIR%
@@ -48,7 +46,7 @@ popd
 REM PyInstaller onedir output: dist\sovlens-backend\{sovlens-backend.exe, _internal\...}
 set "SRC_DIR=%BACKEND_DIR%\dist\sovlens-backend"
 set "SRC_EXE=%SRC_DIR%\sovlens-backend.exe"
-set "DST_DIR=%BINARIES_DIR%\%DEST_DIR_NAME%"
+set "ARCHIVE=%BINARIES_DIR%\sovlens-backend.zip"
 
 if not exist "%SRC_DIR%" (
     echo ERROR: Expected onedir folder not found at %SRC_DIR% >&2
@@ -59,36 +57,35 @@ if not exist "%SRC_EXE%" (
     exit /b 1
 )
 
-REM Wipe stale destination so old files from a previous build don't linger.
-if exist "%DST_DIR%" rmdir /S /Q "%DST_DIR%"
-mkdir "%DST_DIR%"
+if not exist "%BINARIES_DIR%" mkdir "%BINARIES_DIR%"
 
-REM xcopy /E recurse, /I treat dst as dir, /Y overwrite, /H include hidden,
-REM /K preserve attrs (read-only matters for some torch DLLs).
-xcopy /E /I /Y /H /K "%SRC_DIR%" "%DST_DIR%" >nul
+REM Remove any stale archive first so a partial write doesn't fool the size guard.
+if exist "%ARCHIVE%" del /F /Q "%ARCHIVE%"
+
+REM tar.exe ships on Windows 10+ (since build 17063). `-a` infers archive
+REM format from the output extension (.zip => zip). `-C` changes into the
+REM source parent so the archive root is `sovlens-backend\` (not the full
+REM PyInstaller dist path).
+echo =^> Packing archive: %ARCHIVE%
+tar -a -cf "%ARCHIVE%" -C "%BACKEND_DIR%\dist" sovlens-backend
 if errorlevel 1 (
-    echo ERROR: xcopy of onedir failed >&2
+    echo ERROR: tar zip pack failed >&2
     exit /b 1
 )
 
-if not exist "%DST_DIR%\sovlens-backend.exe" (
-    echo ERROR: dst exe missing post-copy ^(likely Defender^): %DST_DIR%\sovlens-backend.exe >&2
+if not exist "%ARCHIVE%" (
+    echo ERROR: archive not produced at %ARCHIVE% >&2
     exit /b 1
 )
 
-REM Aggregate-size guard. Defender real-time scanning has been observed
-REM quarantining individual DLLs between write and read; an empty/partial
-REM onedir would slip past a per-file check, so we sum the folder.
-set "TOTAL_BYTES=0"
-for /f "tokens=*" %%S in ('dir /S /-C "%DST_DIR%" ^| findstr /C:"File(s)"') do (
-    for /f "tokens=3" %%B in ("%%S") do set "TOTAL_BYTES=%%B"
-)
-echo =^> Wrote: %DST_DIR% (total: %TOTAL_BYTES% bytes)
+REM Aggregate-size guard on the compressed zip. PyInstaller onedir with the
+REM ONNX-only stack is ~150-250MB; zip lands ~80-130MB compressed. Guard at
+REM 80MB so a broken (empty/partial) build can't slip through.
+for %%S in ("%ARCHIVE%") do set "ARCHIVE_BYTES=%%~zS"
+echo =^> Wrote: %ARCHIVE% (compressed: %ARCHIVE_BYTES% bytes)
 
-REM 200 MB lower bound — torch + CUDA wheel alone is ~700 MB, but be lenient
-REM in case the layout changes. A real build is ~1.5-2 GB.
-if %TOTAL_BYTES% LSS 200000000 (
-    echo ERROR: sidecar onedir suspiciously small ^(^<200 MB total^) >&2
+if %ARCHIVE_BYTES% LSS 80000000 (
+    echo ERROR: sidecar archive suspiciously small ^(^<80 MB compressed^) >&2
     exit /b 1
 )
 
