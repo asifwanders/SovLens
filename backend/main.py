@@ -80,6 +80,11 @@ import platform_utils
 # there is no system ffmpeg, so without this PATH injection every audio
 # ingest raises [WinError 2]. Must run before whisper.transcribe() ever.
 platform_utils.ensure_ffmpeg_on_path()
+# Register the bundled cuDNN 9 DLL directory so CTranslate2 can find
+# cuDNN at load time. MUST run before any ctranslate2 / faster_whisper
+# import — once the DLL loader has searched without finding cuDNN, the
+# get_cuda_device_count() result is cached at 0 for the process.
+platform_utils.ensure_cudnn_on_path()
 
 # ONNX Runtime diagnostics — surface ORT version + EP detection state in
 # backend.log on every startup so users / bug reports can distinguish: wrong
@@ -98,6 +103,25 @@ def _log_ort_state() -> None:
 
 
 _log_ort_state()
+
+
+def _log_ct2_state() -> None:
+    """Emit CTranslate2 + CUDA visibility at startup so backend.log
+    always shows whether whisper picked GPU or CPU before any task runs.
+    """
+    try:
+        import ctranslate2 as _ct  # type: ignore
+        print(f"[ct2] ctranslate2={_ct.__version__}", flush=True)
+        try:
+            n = _ct.get_cuda_device_count()
+            print(f"[ct2] cuda_device_count={n}", flush=True)
+        except Exception as exc:
+            print(f"[ct2] cuda_device_count probe crashed: {exc!r}", flush=True)
+    except Exception as exc:
+        print(f"[ct2] diagnostic crashed: {exc!r}", flush=True)
+
+
+_log_ct2_state()
 
 
 def _migrate_clip_cache_to_fp16_only() -> None:

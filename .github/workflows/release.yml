@@ -267,6 +267,28 @@ jobs:
           .\venv\Scripts\Activate.ps1
           python -c "import onnxruntime as ort; provs = ort.get_available_providers(); print('ort=', ort.__version__, 'providers=', provs); assert 'DmlExecutionProvider' in provs, f'DirectML EP missing — plain ort wheel contaminated the install: {provs}'"
 
+      # cuDNN 9 DLLs are the only external runtime dep for CTranslate2 4.x
+      # GPU whisper. Without them, end users see "Extreme falls back to
+      # CPU" — same failure mode as gotcha #21 (CUDA torch silently
+      # downgrading). Fail the build if the wheel's DLLs aren't where we
+      # expect them.
+      - name: Verify cuDNN 9 bundle (nvidia-cudnn-cu12)
+        working-directory: backend
+        shell: pwsh
+        run: |
+          .\venv\Scripts\Activate.ps1
+          python -c @"
+          import pathlib, glob, sys
+          import nvidia.cudnn  # type: ignore
+          d = pathlib.Path(nvidia.cudnn.__file__).parent / 'bin'
+          dlls = list(d.glob('cudnn*.dll'))
+          print('cudnn bin dir:', d)
+          print('cudnn dlls found:', [p.name for p in dlls])
+          assert (d / 'cudnn_ops64_9.dll').exists(), 'cudnn_ops64_9.dll missing — CT2 GPU will fall back to CPU'
+          assert (d / 'cudnn64_9.dll').exists(), 'cudnn64_9.dll missing'
+          assert (d / 'cudnn_graph64_9.dll').exists(), 'cudnn_graph64_9.dll missing'
+          "@
+
       - name: Free disk space
         shell: pwsh
         run: |

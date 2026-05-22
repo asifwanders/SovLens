@@ -44,6 +44,13 @@ hh_datas, hh_binaries, hh_hidden = _safe_collect("huggingface_hub")
 # Storage is enabled... hf_xet not installed" log spam + the ~500 MB
 # Whisper download stalls).
 xet_datas, xet_binaries, xet_hidden = _safe_collect("hf_xet")
+# cuDNN 9 DLLs for Windows GPU whisper. nvidia is a PEP-420 namespace
+# package — collect_all the SUB-package (nvidia.cudnn), not the parent.
+# On mac/linux we never install the wheel so collect returns ([], [], []).
+if sys.platform == "win32":
+    cudnn_datas, cudnn_binaries, cudnn_hidden = _safe_collect("nvidia.cudnn")
+else:
+    cudnn_datas, cudnn_binaries, cudnn_hidden = ([], [], [])
 tk_datas, tk_binaries, tk_hidden = _safe_collect("tokenizers")
 ld_datas, ld_binaries, ld_hidden = _safe_collect("lancedb")
 sd_datas, sd_binaries, sd_hidden = _safe_collect("scenedetect")
@@ -83,6 +90,9 @@ HIDDEN_IMPORTS = [
     # via importlib.metadata, so PyInstaller's static analysis misses it
     # without an explicit hidden import.
     "hf_xet",
+    # cuDNN 9 namespace package — Win only, harmless elsewhere.
+    "nvidia",
+    "nvidia.cudnn",
     # Tokenizers (CLIP text encoder)
     "tokenizers",
     # imageio / ffmpeg
@@ -135,7 +145,7 @@ HIDDEN_IMPORTS = [
     "shelve",
     "email.mime.multipart",
     "email.mime.text",
-] + ort_hidden + fw_hidden + ct_hidden + ro_hidden + hh_hidden + xet_hidden + tk_hidden + ld_hidden + sd_hidden + ff_hidden
+] + ort_hidden + fw_hidden + ct_hidden + ro_hidden + hh_hidden + xet_hidden + tk_hidden + ld_hidden + sd_hidden + ff_hidden + cudnn_hidden
 
 # Static model assets that ship inside the bundle. yolov8n.onnx is
 # pre-downloaded by CI (release.yml) before this spec runs — the file
@@ -159,12 +169,12 @@ a = Analysis(
     binaries=(
         ort_binaries + fw_binaries + ct_binaries + ro_binaries
         + hh_binaries + xet_binaries + tk_binaries + ld_binaries
-        + sd_binaries + ff_binaries
+        + sd_binaries + ff_binaries + cudnn_binaries
     ),
     datas=(
         ort_datas + fw_datas + ct_datas + ro_datas
         + hh_datas + xet_datas + tk_datas + ld_datas + sd_datas
-        + ff_datas + _local_models
+        + ff_datas + cudnn_datas + _local_models
     ),
     hiddenimports=HIDDEN_IMPORTS,
     hookspath=[],

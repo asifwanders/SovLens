@@ -12,6 +12,13 @@ onnxruntime>=1.18; platform_system != "Windows"
 onnxruntime-directml>=1.18; platform_system == "Windows"
 # Whisper via faster-whisper (CTranslate2 backend, no torch).
 faster-whisper>=1.0
+# Windows GPU for CTranslate2: cuDNN 9 runtime DLLs. CT2 4.5+ ships
+# cublas + cudart statically inside _ext.pyd; cuDNN 9 is the only
+# external runtime dep, and the wheel is a pure-data wheel (~687 MB)
+# so pip install is fast + reliable on the CI Win runner.
+# Without this CTranslate2.get_cuda_device_count() returns 0 even on
+# RTX cards and faster-whisper silently uses CPU+int8.
+nvidia-cudnn-cu12==9.22.0.52 ; sys_platform == "win32"
 # OCR via RapidOCR — ONNX models ship inside the wheel, no separate download.
 rapidocr-onnxruntime>=1.3
 # Model fetch + tokenizer for CLIP ONNX bundle.

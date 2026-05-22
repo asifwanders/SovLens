@@ -265,6 +265,63 @@ def ensure_ffmpeg_on_path() -> None:
         pass
 
 
+_CUDNN_PATH_INJECTED = False
+
+
+def ensure_cudnn_on_path() -> None:
+    """Make cuDNN 9 DLLs discoverable by CTranslate2 on Windows.
+
+    CTranslate2 ≥4.5 ships cublas + cudart statically inside its `_ext.pyd`
+    but loads cuDNN at runtime via the OS loader. Without the cuDNN DLLs
+    on PATH (or registered via `os.add_dll_directory`),
+    `ctranslate2.get_cuda_device_count()` returns 0 and faster-whisper
+    silently falls back to CPU+int8 — even on a RTX card with a current
+    driver. End-user symptom: "Extreme uses CPU not GPU".
+
+    The PyPI wheel `nvidia-cudnn-cu12` ships the DLLs under
+    `<site-packages>/nvidia/cudnn/bin/`. In a PyInstaller frozen sidecar
+    the same tree lives under `sys._MEIPASS/nvidia/cudnn/bin/`. Both are
+    probed; whichever exists first is registered.
+
+    No-op on mac/linux (`nvidia-cudnn-cu12` is Windows-only by spec).
+    Idempotent.
+    """
+    global _CUDNN_PATH_INJECTED
+    if _CUDNN_PATH_INJECTED or not IS_WINDOWS:
+        return
+    candidates: List[str] = []
+    # 1. PyInstaller frozen layout
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(os.path.join(meipass, "nvidia", "cudnn", "bin"))
+    # 2. site-packages (dev mode or non-frozen run)
+    try:
+        import nvidia.cudnn as _cudnn  # type: ignore
+        candidates.append(os.path.join(os.path.dirname(_cudnn.__file__), "bin"))
+    except Exception:
+        pass
+    registered = False
+    for p in candidates:
+        if not os.path.isdir(p):
+            continue
+        try:
+            # Python 3.8+ explicit DLL search path — required because PATH
+            # alone isn't honored by LoadLibrary in some Win10+ configs
+            # when secure DLL search is enabled.
+            try:
+                os.add_dll_directory(p)
+            except (OSError, AttributeError):
+                pass
+            os.environ["PATH"] = p + os.pathsep + os.environ.get("PATH", "")
+            print(f"[cudnn] registered DLL dir: {p}", flush=True)
+            registered = True
+        except Exception as exc:
+            print(f"[cudnn] failed to register {p}: {exc!r}", flush=True)
+    if not registered:
+        print("[cudnn] no cuDNN bin dir found — whisper will fall back to CPU", flush=True)
+    _CUDNN_PATH_INJECTED = True
+
+
 def get_ffmpeg_exe() -> str:
     """Return the path to the bundled ffmpeg executable via imageio_ffmpeg.
 
