@@ -277,16 +277,16 @@ jobs:
         shell: pwsh
         run: |
           .\venv\Scripts\Activate.ps1
+          # nvidia.cudnn is a PEP-420 namespace pkg — __file__ is None.
+          # Use __path__[0] which works for both namespace and regular pkgs.
           python -c @"
-          import pathlib, glob, sys
-          import nvidia.cudnn  # type: ignore
-          d = pathlib.Path(nvidia.cudnn.__file__).parent / 'bin'
-          dlls = list(d.glob('cudnn*.dll'))
+          import pathlib, nvidia.cudnn
+          d = pathlib.Path(list(nvidia.cudnn.__path__)[0]) / 'bin'
+          dlls = sorted(p.name for p in d.glob('cudnn*.dll'))
           print('cudnn bin dir:', d)
-          print('cudnn dlls found:', [p.name for p in dlls])
-          assert (d / 'cudnn_ops64_9.dll').exists(), 'cudnn_ops64_9.dll missing — CT2 GPU will fall back to CPU'
-          assert (d / 'cudnn64_9.dll').exists(), 'cudnn64_9.dll missing'
-          assert (d / 'cudnn_graph64_9.dll').exists(), 'cudnn_graph64_9.dll missing'
+          print('cudnn dlls found:', dlls)
+          for need in ('cudnn_ops64_9.dll', 'cudnn64_9.dll', 'cudnn_graph64_9.dll'):
+              assert (d / need).exists(), f'{need} missing — CT2 GPU will fall back to CPU'
           "@
 
       - name: Free disk space

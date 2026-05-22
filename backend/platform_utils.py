@@ -294,10 +294,12 @@ def ensure_cudnn_on_path() -> None:
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
         candidates.append(os.path.join(meipass, "nvidia", "cudnn", "bin"))
-    # 2. site-packages (dev mode or non-frozen run)
+    # 2. site-packages (dev mode or non-frozen run). nvidia.cudnn is a
+    # PEP-420 namespace package — __file__ is None, so use __path__[0].
     try:
         import nvidia.cudnn as _cudnn  # type: ignore
-        candidates.append(os.path.join(os.path.dirname(_cudnn.__file__), "bin"))
+        for _pp in list(getattr(_cudnn, "__path__", [])):
+            candidates.append(os.path.join(_pp, "bin"))
     except Exception:
         pass
     registered = False
