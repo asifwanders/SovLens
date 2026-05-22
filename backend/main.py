@@ -56,6 +56,18 @@ if sys.platform == "win32":
         pass
 
 
+# huggingface_hub default cache layout writes symlinks
+# (~/.cache/huggingface/hub/<repo>/snapshots/<rev>/file -> ../../blobs/<sha>).
+# On Win without Developer Mode that fails with
+#   [WinError 1314] A required privilege is not held by the client
+# which leaves the cache half-written and the warmup task crashes. We
+# work around it by (a) silencing the now-harmless warning and (b)
+# using `local_dir=...` + `local_dir_use_symlinks=False` everywhere we
+# call snapshot_download (see core.py CLIP loader). The env var below
+# just kills the "consider enabling symlinks" spam.
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
+
 
 import core
 import ingestion
@@ -1245,20 +1257,38 @@ def _hf_file_cached(repo_id: str, filename: str, min_bytes: int = 1) -> bool:
 def _clip_downloaded() -> bool:
     """CLIP is "downloaded" when tokenizer + the fp16 ONNX pair is on disk.
 
-    core.py's snapshot_download only pulls fp16 (see allow_patterns there),
-    so checking for the fp16 pair specifically is correct. We keep an
-    fp32 fallback for users mid-upgrade who already have the larger
-    vision_model.onnx cached from an older build — those installs report
-    downloaded=true and skip the redundant fp16 fetch.
+    Two layouts checked, in order:
+      1. <app_data>/models/clip-vit-large-patch14/ — the 0.1.5+ local_dir
+         layout (no symlinks, Win-safe).
+      2. HF default cache (~/.cache/huggingface/hub/models--Xenova--clip-*)
+         — pre-0.1.5 installs may still have files here; we accept them
+         as "downloaded" so they aren't forced to re-pull on upgrade.
     """
+    def _local_ok(rel: str, min_bytes: int) -> bool:
+        p = os.path.join(
+            platform_utils.get_app_data_dir(),
+            "models",
+            "clip-vit-large-patch14",
+            *rel.split("/"),
+        )
+        try:
+            return os.path.isfile(p) and os.path.getsize(p) >= min_bytes
+        except OSError:
+            return False
+
+    # Layout 1: app-local. tokenizer.json + fp16 pair.
+    if _local_ok("tokenizer.json", 10_000) and \
+       _local_ok("onnx/vision_model_fp16.onnx", 400 * 1024 * 1024) and \
+       _local_ok("onnx/text_model_fp16.onnx", 150 * 1024 * 1024):
+        return True
+
+    # Layout 2: legacy HF cache. tokenizer + (fp16 OR fp32 pair).
     tok = _hf_file_cached(_HF_CLIP_REPO_ID, "tokenizer.json", min_bytes=10_000)
     if not tok:
         return False
-    # fp16 (current build): vision ~580 MB, text ~236 MB.
     if _hf_file_cached(_HF_CLIP_REPO_ID, "onnx/vision_model_fp16.onnx", min_bytes=400 * 1024 * 1024) and \
        _hf_file_cached(_HF_CLIP_REPO_ID, "onnx/text_model_fp16.onnx", min_bytes=150 * 1024 * 1024):
         return True
-    # fp32 fallback for legacy caches.
     if _hf_file_cached(_HF_CLIP_REPO_ID, "onnx/vision_model.onnx", min_bytes=800 * 1024 * 1024) and \
        _hf_file_cached(_HF_CLIP_REPO_ID, "onnx/text_model.onnx", min_bytes=300 * 1024 * 1024):
         return True
@@ -1439,7 +1469,16 @@ def _hf_cache_size(*needles: str) -> int:
 @app.get("/models/progress")
 def models_progress():
     """Bytes-on-disk vs expected-total per model. Cheap (filesystem walk)."""
-    clip_now = _hf_cache_size("clip-vit-large-patch14", "clip-ViT-L-14")
+    # CLIP may live in either the new app-local dir (0.1.5+) or the
+    # legacy HF cache. Sum both so a half-migrated install still shows
+    # accurate progress.
+    clip_local_dir = os.path.join(
+        platform_utils.get_app_data_dir(), "models", "clip-vit-large-patch14"
+    )
+    clip_now = (
+        _dir_bytes(clip_local_dir)
+        + _hf_cache_size("clip-vit-large-patch14", "clip-ViT-L-14")
+    )
     whisper_size = "base"
     try:
         whisper_size = (config.get_current_level_params().get("whisper_model") or "base").lower()

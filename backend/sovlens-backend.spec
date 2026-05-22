@@ -38,6 +38,12 @@ fw_datas, fw_binaries, fw_hidden = _safe_collect("faster_whisper")
 ct_datas, ct_binaries, ct_hidden = _safe_collect("ctranslate2")
 ro_datas, ro_binaries, ro_hidden = _safe_collect("rapidocr_onnxruntime")
 hh_datas, hh_binaries, hh_hidden = _safe_collect("huggingface_hub")
+# hf_xet is a separate wheel that huggingface_hub probes at runtime —
+# without an explicit collect_all PyInstaller misses it entirely, leaving
+# end users on the slow Xet-bridge fallback (the source of the "Xet
+# Storage is enabled... hf_xet not installed" log spam + the ~500 MB
+# Whisper download stalls).
+xet_datas, xet_binaries, xet_hidden = _safe_collect("hf_xet")
 tk_datas, tk_binaries, tk_hidden = _safe_collect("tokenizers")
 ld_datas, ld_binaries, ld_hidden = _safe_collect("lancedb")
 sd_datas, sd_binaries, sd_hidden = _safe_collect("scenedetect")
@@ -73,6 +79,10 @@ HIDDEN_IMPORTS = [
     "rapidocr_onnxruntime",
     # HuggingFace hub (model download for CLIP ONNX bundle)
     "huggingface_hub",
+    # Xet transport — huggingface_hub picks it up by name at runtime
+    # via importlib.metadata, so PyInstaller's static analysis misses it
+    # without an explicit hidden import.
+    "hf_xet",
     # Tokenizers (CLIP text encoder)
     "tokenizers",
     # imageio / ffmpeg
@@ -125,7 +135,7 @@ HIDDEN_IMPORTS = [
     "shelve",
     "email.mime.multipart",
     "email.mime.text",
-] + ort_hidden + fw_hidden + ct_hidden + ro_hidden + hh_hidden + tk_hidden + ld_hidden + sd_hidden + ff_hidden
+] + ort_hidden + fw_hidden + ct_hidden + ro_hidden + hh_hidden + xet_hidden + tk_hidden + ld_hidden + sd_hidden + ff_hidden
 
 # Static model assets that ship inside the bundle. yolov8n.onnx is
 # pre-downloaded by CI (release.yml) before this spec runs — the file
@@ -148,12 +158,12 @@ a = Analysis(
     pathex=[],
     binaries=(
         ort_binaries + fw_binaries + ct_binaries + ro_binaries
-        + hh_binaries + tk_binaries + ld_binaries + sd_binaries
-        + ff_binaries
+        + hh_binaries + xet_binaries + tk_binaries + ld_binaries
+        + sd_binaries + ff_binaries
     ),
     datas=(
         ort_datas + fw_datas + ct_datas + ro_datas
-        + hh_datas + tk_datas + ld_datas + sd_datas
+        + hh_datas + xet_datas + tk_datas + ld_datas + sd_datas
         + ff_datas + _local_models
     ),
     hiddenimports=HIDDEN_IMPORTS,

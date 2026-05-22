@@ -177,8 +177,19 @@ def _ensure_sessions() -> Tuple[Any, Any, Any]:
         providers = platform_utils.get_onnx_providers()
         print(f"[core] Loading CLIP ONNX ({wanted}) with providers={providers}")
 
-        # Pull the ONNX bundle from HF Hub on first use; cached for subsequent
-        # launches in ~/.cache/huggingface.
+        # Pull the ONNX bundle from HF Hub on first use; cached for
+        # subsequent launches under <app_data>/models/clip-vit-large-patch14.
+        #
+        # local_dir mode (not the default HF cache layout) for two reasons:
+        #   1. Win without Developer Mode can't create the
+        #      snapshots/<rev>/file -> ../../blobs/<sha> symlinks the
+        #      default layout relies on. Error:
+        #        [WinError 1314] A required privilege is not held by the client
+        #      End-user symptom: CLIP warmup crashes mid-fetch, retries
+        #      every launch, never reaches Downloaded state.
+        #   2. local_dir_use_symlinks=False writes the file directly to
+        #      its destination — no blobs/, no snapshots/, no symlinks.
+        #      Same idea we use for the YOLO bundled-asset fallback.
         #
         # IMPORTANT: enumerate the EXACT filenames we want. The repo ships
         # 8 quantization variants per submodel (fp32, fp16, bnb4, int8, q4,
@@ -186,8 +197,14 @@ def _ensure_sessions() -> Tuple[Any, Any, Any]:
         # ALL of them (~3.7 GB total) when we only need one pair (~820 MB).
         # fp16 is the best speed/quality tradeoff on CoreML / CUDA / DML;
         # on CPU EP the cast is essentially free at ORT graph-opt time.
+        clip_local_dir = os.path.join(
+            platform_utils.get_app_data_dir(), "models", "clip-vit-large-patch14"
+        )
+        os.makedirs(clip_local_dir, exist_ok=True)
         local_dir = snapshot_download(
             repo_id=_HF_ONNX_REPO_ID,
+            local_dir=clip_local_dir,
+            local_dir_use_symlinks=False,
             allow_patterns=[
                 "onnx/vision_model_fp16.onnx",
                 "onnx/text_model_fp16.onnx",
