@@ -1595,8 +1595,23 @@ def models_warmup(req: WarmupRequest, background_tasks: BackgroundTasks):
 
     def _warmup_whisper():
         try:
-            audio_ingest._get_whisper_model()
-            print("[warmup] Whisper loaded")
+            # Read the configured whisper_model for the active level so
+            # warmup pulls the SAME variant the ingestion code path will
+            # later request. Default arg of _get_whisper_model() is
+            # "base"; on Extreme level the configured model is "small"
+            # (~500 MB). Without this lookup the warmup quietly fetched
+            # base (~141 MB) while the UI bytes_total kept reporting the
+            # Extreme-level expectation of ~500 MB — looked like a
+            # download stuck at "141 / 500 MB" because base finished
+            # but small was never started.
+            try:
+                name = (config.get_current_level_params()
+                              .get("whisper_model") or "base").lower()
+            except Exception:
+                name = "base"
+            print(f"[warmup] Whisper requested model={name}", flush=True)
+            audio_ingest._get_whisper_model(name)
+            print(f"[warmup] Whisper loaded model={name}", flush=True)
         except Exception as exc:
             print(f"[warmup] Whisper error: {exc}")
 
