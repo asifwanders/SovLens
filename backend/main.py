@@ -37,6 +37,63 @@ def _log_ort_state() -> None:
 
 
 _log_ort_state()
+
+
+def _migrate_clip_cache_to_fp16_only() -> None:
+    """One-time cleanup: wipe legacy CLIP cache entries from buggy wildcard pulls.
+
+    Versions <= 0.1.0 used snapshot_download with allow_patterns
+    "vision_model*.onnx" + "text_model*.onnx" — a wildcard that matched all
+    8 quantization variants per submodel (~3.7 GB total) when we only ever
+    loaded one pair. 0.1.1 narrows the patterns to fp16 only (~830 MB), but
+    existing installs already have the orphan fp32 / quantized blobs sitting
+    in ~/.cache/huggingface/hub/models--Xenova--clip-vit-large-patch14.
+
+    Detection heuristic: presence of `vision_model.onnx` (the 1.6 GB fp32
+    blob) — only the wildcard pull produced this file. fp16-only pulls
+    never write it. If we see it, wipe the whole CLIP snapshot dir and let
+    snapshot_download fetch the right files on next launch.
+
+    Idempotent via a stamp file under get_app_data_dir(). Best-effort:
+    any failure is swallowed so a borked migration never blocks boot.
+    """
+    try:
+        from pathlib import Path
+        import shutil
+
+        stamp = Path(platform_utils.get_app_data_dir()) / ".clip-cache-migrated-0.1.1"
+        if stamp.exists():
+            return
+
+        hf_hub = Path(os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))) / "hub"
+        clip_root = hf_hub / "models--Xenova--clip-vit-large-patch14"
+        if not clip_root.exists():
+            stamp.parent.mkdir(parents=True, exist_ok=True)
+            stamp.write_text("no-cache-at-migration\n")
+            return
+
+        snapshots_dir = clip_root / "snapshots"
+        has_legacy = False
+        if snapshots_dir.exists():
+            for snap in snapshots_dir.iterdir():
+                if (snap / "onnx" / "vision_model.onnx").exists():
+                    has_legacy = True
+                    break
+
+        if has_legacy:
+            try:
+                shutil.rmtree(clip_root, ignore_errors=True)
+                print(f"[clip-migrate] wiped legacy CLIP cache at {clip_root}", flush=True)
+            except Exception as exc:
+                print(f"[clip-migrate] wipe failed (non-fatal): {exc!r}", flush=True)
+
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text("migrated\n")
+    except Exception as exc:
+        print(f"[clip-migrate] scan crashed (non-fatal): {exc!r}", flush=True)
+
+
+_migrate_clip_cache_to_fp16_only()
 import hls_stream
 import json
 import mimetypes
