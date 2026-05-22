@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-shell";
 import { getVersion } from "@tauri-apps/api/app";
@@ -85,7 +85,6 @@ export default function SettingsPage() {
   const [modelStatus, setModelStatus] = useState<ModelsStatusResponse | null>(null);
   const [modelProgress, setModelProgress] = useState<ModelsProgressResponse | null>(null);
   const [warming, setWarming] = useState<Set<string>>(new Set());
-  const warmingRef = useRef<Set<string>>(new Set());
 
   // Updater state
   const [appVersion, setAppVersion] = useState<string>("...");
@@ -118,17 +117,19 @@ export default function SettingsPage() {
       const data = (await res.json()) as ModelsStatusResponse;
       setModelStatus(data);
       // Drop warming flags for any model that has finished downloading.
-      if (warmingRef.current.size > 0) {
-        const next = new Set(warmingRef.current);
-        for (const key of warmingRef.current) {
+      // Use the functional setState form so we read the latest `warming`
+      // set without needing a ref (Next 16's react-hooks/refs lint rule
+      // refuses ref access from anything that could be reached during
+      // render — even a callback chain).
+      setWarming((prev) => {
+        if (prev.size === 0) return prev;
+        const next = new Set(prev);
+        for (const key of prev) {
           const k = key as keyof ModelsStatusResponse;
           if (data[k]?.downloaded) next.delete(key);
         }
-        if (next.size !== warmingRef.current.size) {
-          warmingRef.current = next;
-          setWarming(next);
-        }
-      }
+        return next.size === prev.size ? prev : next;
+      });
     } catch {
       // backend not ready yet — ignore
     }
@@ -206,11 +207,17 @@ export default function SettingsPage() {
   }, []);
 
   const warmup = useCallback(async (key: string) => {
-    if (warmingRef.current.has(key)) return;
-    const next = new Set(warmingRef.current);
-    next.add(key);
-    warmingRef.current = next;
-    setWarming(next);
+    // No early-return on warming.has(key) — when a previous warmup
+    // stalled (Xet transport hang, network drop), re-clicking Download
+    // must re-fire so the backend can wipe the stale .incomplete
+    // partial and start a fresh transfer. Backend de-dupes idempotently
+    // via the HF cache.
+    setWarming((prev) => {
+      if (prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.add(key);
+      return next;
+    });
     try {
       await fetch(`${API_BASE}/models/warmup`, {
         method: "POST",
@@ -483,6 +490,13 @@ export default function SettingsPage() {
                               />
                             </div>
                             <span className="text-xs text-foreground/60 tabular-nums w-8 text-right">{pct}%</span>
+                            <button
+                              onClick={() => warmup(m.key)}
+                              title="Re-fire download. Use this if progress is stuck — wipes any stale partial file and restarts the transfer."
+                              className="text-xs px-2 py-0.5 rounded border border-foreground/20 hover:bg-foreground/5 text-foreground/70 transition-colors"
+                            >
+                              Retry
+                            </button>
                           </div>
                         );
                       })()

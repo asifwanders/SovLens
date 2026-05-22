@@ -16,6 +16,12 @@ faster-whisper>=1.0
 rapidocr-onnxruntime>=1.3
 # Model fetch + tokenizer for CLIP ONNX bundle.
 huggingface-hub>=0.24
+# Xet storage transport for HF Hub. Without it, repos that ship via
+# Xet (Systran/faster-whisper-*, Xenova/clip-* — most non-trivial ones
+# now) fall back to vanilla HTTP via cas-bridge.xethub.hf.co which
+# stalls mid-download on flaky links. End-user symptom: progress bar
+# stuck at e.g. 141/500 MB and never advances.
+hf_xet>=1.0
 tokenizers>=0.20
 # Video segmentation (pure-Python, depends on numpy+click — no torch).
 scenedetect>=0.6.7

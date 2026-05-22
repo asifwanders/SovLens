@@ -1467,6 +1467,54 @@ def models_progress():
     }
 
 
+def _wipe_stale_partials(repo_name_substring: str, stale_after_seconds: int = 60) -> int:
+    """Delete .incomplete partials in the HF cache that look abandoned.
+
+    huggingface_hub writes downloads into ``blobs/<sha>.incomplete`` while
+    streaming. If a previous warmup stalled (Xet fallback over a flaky
+    link can hang at e.g. 141/500 MB and never advance), the .incomplete
+    file sits around forever and re-running the warmup just resumes the
+    same broken transfer. Removing it forces a clean restart.
+
+    `stale_after_seconds` guards against deleting an actively-running
+    download in another thread — we only nuke partials that haven't been
+    touched recently.
+
+    Returns the number of files removed (for logging / sanity).
+    """
+    import time as _time
+    from pathlib import Path
+    removed = 0
+    try:
+        hf_hub = Path(os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))) / "hub"
+        if not hf_hub.exists():
+            return 0
+        needle = repo_name_substring.replace("/", "_").replace("-", "").lower()
+        now = _time.time()
+        for child in hf_hub.iterdir():
+            if not child.is_dir():
+                continue
+            cname = child.name.replace("-", "").lower()
+            if needle not in cname:
+                continue
+            for f in child.rglob("*.incomplete"):
+                try:
+                    age = now - f.stat().st_mtime
+                except OSError:
+                    continue
+                if age >= stale_after_seconds:
+                    try:
+                        f.unlink()
+                        removed += 1
+                    except OSError:
+                        pass
+    except Exception as exc:
+        print(f"[warmup] stale-partial scan crashed (non-fatal): {exc!r}", flush=True)
+    if removed:
+        print(f"[warmup] wiped {removed} stale .incomplete file(s) under {repo_name_substring!r}", flush=True)
+    return removed
+
+
 class WarmupRequest(BaseModel):
     model: str  # "clip" | "whisper" | "yolo" | "ocr"
 
@@ -1477,10 +1525,24 @@ def models_warmup(req: WarmupRequest, background_tasks: BackgroundTasks):
 
     Frontend should poll /models/status until loaded=true.
     BackgroundTask avoids blocking the request thread for cold-load (~30s).
+
+    Each warmup wipes stale .incomplete partials for its target repo so a
+    previous stalled transfer doesn't poison the resume. Safe because the
+    stale-after threshold (60 s) is much longer than any real chunk-write
+    interval during an actively-progressing download.
     """
     valid = {"clip", "whisper", "yolo", "ocr"}
     if req.model not in valid:
         raise HTTPException(status_code=400, detail=f"model must be one of {valid}")
+
+    # Map model -> HF repo substring used by _wipe_stale_partials.
+    _PARTIAL_NEEDLE = {
+        "clip":    "clip-vit-large-patch14",
+        "whisper": "faster-whisper",
+        # yolo is bundled now — no HF cache to scrub
+        "ocr":     "",  # rapidocr ships inside the wheel
+    }
+    _wipe_stale_partials(_PARTIAL_NEEDLE.get(req.model, ""))
 
     def _warmup_clip():
         try:
