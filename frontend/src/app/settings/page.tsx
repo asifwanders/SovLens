@@ -323,7 +323,7 @@ export default function SettingsPage() {
         setIsIngesting(true);
         setReindexInFlight(true);
         setReindexMessage(
-          "Re-indexing started. This will take a while. Check the home page indicator."
+          "Re-indexing started. Progress shows in the banner at the top.",
         );
       }
     } catch {

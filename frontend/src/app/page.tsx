@@ -54,9 +54,9 @@ export default function Home() {
   // Lets the home grid refresh after a folder is removed (or anything else
   // mutates the table) without waiting for an ingest-end edge transition.
   const mediaGenRef = useRef<number>(-1);
-  // Active job (reindex / add_folder / add_files) for the in-page banner.
-  type JobInfo = { id: string; type: string; description: string; total: number; done: number; current: string };
-  const [activeJob, setActiveJob] = useState<JobInfo | null>(null);
+  // Job progress is rendered globally by JobBanner (mounted in
+  // app/layout.tsx). Home page only needs ingestion-end detection to
+  // know when to refetch /media.
 
   // ── A. Drag-drop state ───────────────────────────────────────────────────
   const [dragOver, setDragOver] = useState(false);
@@ -121,7 +121,6 @@ export default function Home() {
         const data = await res.json() as {
           is_ingesting: boolean;
           media_generation?: number;
-          jobs?: JobInfo[];
         };
 
         // Refresh on ingest-end edge OR on media_generation bump (covers
@@ -136,17 +135,6 @@ export default function Home() {
           refreshKnownPaths();
         }
         mediaGenRef.current = gen;
-
-        // Pick the most informative active job (the one with the highest
-        // total). Multiple background tasks can run in parallel but the
-        // user usually only kicks one off at a time.
-        const jobs = data.jobs ?? [];
-        if (jobs.length === 0) {
-          setActiveJob(null);
-        } else {
-          const best = jobs.reduce((a, b) => (b.total > a.total ? b : a), jobs[0]);
-          setActiveJob(best);
-        }
 
         isIngestingRef.current = data.is_ingesting;
         setIsIngesting(data.is_ingesting);
@@ -368,38 +356,8 @@ export default function Home() {
         </div>
       )}
 
-      {/* Ingestion spinner — shows live progress (N of M files) when /jobs
-          reports an active job. Falls back to a generic message otherwise. */}
-      {isIngesting && (
-        <div className="absolute top-8 left-1/2 -translate-x-1/2 z-50 flex flex-col items-center gap-2 bg-black/80 dark:bg-white/10 backdrop-blur-xl text-white px-6 py-3 rounded-2xl shadow-2xl border border-white/10 animate-in slide-in-from-top-4 min-w-[320px]">
-          <div className="flex items-center gap-3 w-full">
-            <div className="w-5 h-5 border-2 border-[#00b9a0] border-t-transparent rounded-full animate-spin shrink-0" />
-            <span className="text-sm font-medium flex-1 truncate">
-              {activeJob?.description ?? "AI is analyzing media…"}
-              {activeJob && activeJob.total > 0
-                ? ` — ${activeJob.done} / ${activeJob.total}`
-                : ""}
-            </span>
-          </div>
-          {activeJob && activeJob.total > 0 && (
-            <>
-              <div className="h-1 w-full bg-white/15 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-[#00b9a0] transition-[width] duration-500"
-                  style={{
-                    width: `${Math.min(100, Math.round((100 * activeJob.done) / activeJob.total))}%`,
-                  }}
-                />
-              </div>
-              {activeJob.current && (
-                <div className="text-[10px] text-white/60 w-full truncate">
-                  {activeJob.current.split(/[\\/]/).pop()}
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      )}
+      {/* Global ingestion banner now lives in app/layout.tsx (JobBanner)
+          so it shows on every route. Don't render a per-page copy. */}
 
       {!showSplash && (
         <div className="p-8 w-full h-full animate-in fade-in duration-1000">

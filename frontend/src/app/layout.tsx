@@ -3,6 +3,7 @@ import { Ubuntu } from "next/font/google";
 import Script from "next/script";
 import "./globals.css";
 import Sidebar from "@/components/Sidebar";
+import JobBanner from "@/components/JobBanner";
 
 const ubuntu = Ubuntu({
   weight: ["300", "400", "500", "700"],
@@ -50,6 +51,10 @@ export default function RootLayout({
         <main className="flex-1 overflow-y-auto relative z-0">
           {children}
         </main>
+        {/* Global progress banner — fixed top-center, z-9999, visible on
+            every route (All Media, Search, Folders, Settings, …). Polls
+            /status itself; no parent wiring needed. */}
+        <JobBanner />
       </body>
     </html>
   );

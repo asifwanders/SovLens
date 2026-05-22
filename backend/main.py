@@ -4,10 +4,59 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List
 import os
+import sys
 import uuid
 import hashlib
 import subprocess
 import threading
+
+
+# ---------------------------------------------------------------------------
+# stdout/stderr safety shim — Win-only
+# ---------------------------------------------------------------------------
+# When the sidecar is spawned by Tauri with no attached console, its
+# stdout/stderr are pipes that the Rust shell drains into backend.log.
+# Past a certain pipe buffer state Windows starts raising
+# OSError(Errno 22, "Invalid argument") on every write/flush. Each raised
+# OSError aborts the calling code path — uvicorn's access logger, our
+# own print() lines in /folders DELETE, etc. — turning every logging
+# attempt into a 500.
+#
+# Wrap stdout/stderr in a shim that swallows OSError on write+flush so a
+# borked stdout never crashes a request handler. The data is lost (we
+# already log to a RotatingFileHandler via logging.basicConfig anyway),
+# but the API call survives.
+class _SafeStream:
+    def __init__(self, underlying):
+        self._w = underlying
+
+    def write(self, s):
+        try:
+            return self._w.write(s)
+        except OSError:
+            return len(s) if isinstance(s, str) else 0
+
+    def flush(self):
+        try:
+            self._w.flush()
+        except OSError:
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self._w, name)
+
+
+if sys.platform == "win32":
+    try:
+        sys.stdout = _SafeStream(sys.stdout)  # type: ignore[assignment]
+        sys.stderr = _SafeStream(sys.stderr)  # type: ignore[assignment]
+    except Exception:
+        # If the shim install itself fails, leave the originals alone —
+        # at worst we get the same Errno 22 crash users already see.
+        pass
+
+
+
 import core
 import ingestion
 import index_build
