@@ -1,2 +1,0 @@
-# Install torch with CUDA support before main requirements:
-# pip install torch --index-url https://download.pytorch.org/whl/cu121

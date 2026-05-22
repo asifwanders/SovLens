@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:14793 http://localhost:14793 http://localhost:3000 ws://localhost:3000 https://github.com https://*.githubusercontent.com; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: http://127.0.0.1:14793 http://localhost:14793; media-src 'self' blob: data: http://127.0.0.1:14793 http://localhost:14793; font-src 'self' data:; frame-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'"
     }
   },
   "bundle": {

@@ -313,16 +313,39 @@ pub fn run() {
                     .resolve("binaries/sovlens-backend.tar.gz",
                              tauri::path::BaseDirectory::Resource);
 
-                // Per-user writable extract root: <app_data>/sidecar/
-                // Using app_data_dir (not cache_dir) so that on Win NSIS
-                // currentUser installs the bundle resource and extracted
-                // tree share an ownership context. We never extract into
-                // the Tauri resource dir itself — that lives under the
-                // app bundle / Program Files and is read-only.
+                // Per-user writable extract root: <local_app_data>/sidecar/
+                //
+                // app_LOCAL_data_dir (not app_data_dir) is intentional:
+                //   - On Win, app_data_dir() returns Roaming (%APPDATA%).
+                //     We want Local (%LOCALAPPDATA%) so the sidecar lives
+                //     in the same dir tree as the Python backend's
+                //     LanceDB / logs (which use %LOCALAPPDATA%) AND so
+                //     the NSIS uninstall hook (RMDir $LOCALAPPDATA\SovLens)
+                //     wipes everything in one shot. Without this, the
+                //     ~300 MB sidecar dir leaked under Roaming on uninstall.
+                //   - On mac/linux, app_local_data_dir == app_data_dir, so
+                //     this is a no-op (both → ~/Library/Application Support
+                //     / ~/.local/share).
+                // We never extract into the Tauri resource dir itself —
+                // that lives under the app bundle / Program Files and is
+                // read-only on Win.
                 let extract_root: Result<PathBuf, String> = app.path()
-                    .app_data_dir()
+                    .app_local_data_dir()
                     .map(|p| p.join("sidecar"))
                     .map_err(|e| e.to_string());
+
+                // One-time migration: pre-0.1.1 builds extracted under
+                // Roaming (%APPDATA%). Clean that up so it doesn't sit
+                // forever as orphan cruft. Best-effort — never fail boot.
+                #[cfg(windows)]
+                {
+                    if let Ok(roaming) = app.path().app_data_dir() {
+                        let legacy = roaming.join("sidecar");
+                        if legacy.exists() {
+                            let _ = std::fs::remove_dir_all(&legacy);
+                        }
+                    }
+                }
 
                 let expected_version = env!("CARGO_PKG_VERSION");
                 let resolved: Result<PathBuf, String> = (|| -> Result<PathBuf, String> {
