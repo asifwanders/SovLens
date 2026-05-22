@@ -6,9 +6,43 @@ import pyarrow as pa
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 from PIL import Image
-from scipy.fft import dct as _dct
 import platform_utils
 import config
+
+
+# ---------------------------------------------------------------------------
+# DCT-II (ortho) — pure numpy, replaces scipy.fft.dct so we don't pull ~40MB
+# scipy into the frozen exe just for the 32x32 pHash transform.
+# Precompute the basis matrix once; the transform is then a matmul.
+# ---------------------------------------------------------------------------
+
+def _make_dct_matrix(n: int) -> np.ndarray:
+    """Return the n×n DCT-II 'ortho' basis matrix M where Y = M @ X gives the
+    ortho-normalised DCT-II of X along axis 0."""
+    k = np.arange(n).reshape(-1, 1)            # (n, 1)
+    j = np.arange(n).reshape(1, -1)            # (1, n)
+    m = np.cos(np.pi * (2 * j + 1) * k / (2 * n)).astype(np.float32)
+    # Ortho normalisation: row 0 scales by 1/sqrt(n), rows >0 by sqrt(2/n).
+    m[0] *= np.sqrt(1.0 / n)
+    m[1:] *= np.sqrt(2.0 / n)
+    return m
+
+
+# pHash uses a fixed 32×32 DCT, so cache the basis at module load.
+_DCT_MATRIX_32 = _make_dct_matrix(32)
+
+
+def _dct(x: np.ndarray, *, norm: str = "ortho", axis: int = -1) -> np.ndarray:
+    """Drop-in for scipy.fft.dct used by pHash (norm='ortho', axis=0|1, 32×32)."""
+    assert norm == "ortho", "only ortho norm is supported"
+    if x.shape[axis] != 32:
+        # Generic fallback for other sizes (unused today but kept for safety).
+        m = _make_dct_matrix(x.shape[axis])
+    else:
+        m = _DCT_MATRIX_32
+    if axis == 0 or axis == -2:
+        return m @ x
+    return x @ m.T
 
 # ONNX Runtime replaces the torch + sentence-transformers stack for CLIP.
 # `device` is kept as a legacy module-level for callers / status endpoints
