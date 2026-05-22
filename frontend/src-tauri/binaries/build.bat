@@ -62,13 +62,20 @@ if not exist "%BINARIES_DIR%" mkdir "%BINARIES_DIR%"
 REM Remove any stale archive first so a partial write doesn't fool the size guard.
 if exist "%ARCHIVE%" del /F /Q "%ARCHIVE%"
 
-REM tar.exe ships on Windows 10+ (since build 17063). -czf produces gzip
-REM tarball; same format used by mac/linux build.sh so the Rust shell
-REM only needs ONE extraction codepath. -C changes into the source
+REM tar.exe ships on Windows 10+ (since build 17063) at %SystemRoot%\System32.
+REM -czf produces gzip tarball; same format used by mac/linux build.sh so the
+REM Rust shell only needs ONE extraction codepath. -C changes into the source
 REM parent so the archive root is `sovlens-backend\` (not the full
 REM PyInstaller dist path).
+REM
+REM IMPORTANT: invoke by absolute path. Git for Windows installs GNU tar at
+REM C:\Program Files\Git\usr\bin\tar.exe which gets resolved AHEAD of bsdtar
+REM on dev boxes. GNU tar interprets "C:" as a remote-host syntax and fails
+REM with "Cannot connect to C: resolve failed". bsdtar handles Win drive
+REM letters natively. CI runners don't yet hit this but the absolute path
+REM is the durable fix.
 echo =^> Packing archive: %ARCHIVE%
-tar -czf "%ARCHIVE%" -C "%BACKEND_DIR%\dist" sovlens-backend
+"%SystemRoot%\System32\tar.exe" -czf "%ARCHIVE%" -C "%BACKEND_DIR%\dist" sovlens-backend
 if errorlevel 1 (
     echo ERROR: tar gzip pack failed >&2
     exit /b 1

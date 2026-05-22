@@ -337,17 +337,36 @@ jobs:
           pip install --retries 5 --timeout 60 -c constraints.txt -r requirements.txt
           pip install --retries 5 --timeout 60 -c constraints.txt -r requirements-build.txt
 
-      # ONNX Runtime ships its own CUDA / DirectML EPs as wheels (no CUDA
-      # toolkit install needed on the runner). On Windows we install
-      # onnxruntime-directml from requirements.txt so DmlExecutionProvider
-      # is always present; the marker in requirements.txt selects the right
-      # wheel per platform. Verify ORT loads cleanly + log providers.
-      - name: Verify ONNX Runtime
+      # rapidocr-onnxruntime and scenedetect declare unpinned transitive deps
+      # on the plain wheels `onnxruntime` and `opencv-python`. pip installs
+      # them ALONGSIDE the explicit `onnxruntime-directml` + `opencv-python-
+      # headless<4.11` requested by requirements.txt. The plain wheels share
+      # the `onnxruntime` / `cv2` namespaces and the last-installed wins at
+      # import — so end-users silently lose DirectML EP (CPU-only, 5-10x
+      # slow) and pick up opencv 4.13 which declares numpy>=2 (breaks
+      # LanceDB 0.14 per CLAUDE.md gotcha #3). Same class of bug as the
+      # CUDA torch wheel issue (gotcha #21). Verified-from-end-user log on
+      # the Win dev box: get_available_providers() returned
+      # ['AzureExecutionProvider','CPUExecutionProvider'] post-install.
+      - name: Re-pin DirectML ORT + headless opencv (kill plain-wheel contamination)
         working-directory: backend
         shell: pwsh
         run: |
           .\venv\Scripts\Activate.ps1
-          python -c "import onnxruntime as ort; print('ort=', ort.__version__, 'providers=', ort.get_available_providers())"
+          pip uninstall -y onnxruntime opencv-python
+          pip install --force-reinstall --no-deps onnxruntime-directml
+          pip install --force-reinstall --no-deps "opencv-python-headless<4.11"
+
+      # ONNX Runtime ships its own CUDA / DirectML EPs as wheels (no CUDA
+      # toolkit install needed on the runner). Verify ORT loads cleanly +
+      # hard-fail the build if DmlExecutionProvider isn't present. Skipping
+      # this assert previously let CPU-only releases ship.
+      - name: Verify ONNX Runtime + DirectML EP
+        working-directory: backend
+        shell: pwsh
+        run: |
+          .\venv\Scripts\Activate.ps1
+          python -c "import onnxruntime as ort; provs = ort.get_available_providers(); print('ort=', ort.__version__, 'providers=', provs); assert 'DmlExecutionProvider' in provs, f'DirectML EP missing — plain ort wheel contaminated the install: {provs}'"
 
       - name: Free disk space
         shell: pwsh
