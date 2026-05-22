@@ -1,0 +1,4 @@
+# yolov8n.onnx is downloaded here by CI before PyInstaller bundles it.
+# Local dev: the runtime fall back fetches from
+# https://github.com/ultralytics/assets/releases/download/v8.4.0/yolov8n.onnx
+# on first use if the bundled file is missing.

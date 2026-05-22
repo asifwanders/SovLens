@@ -769,23 +769,26 @@ def _reindex_all_wrapper() -> None:
     partial live table and rename the backup back. On success, drop the
     backup. This guarantees that a mid-run crash never destroys user data.
     """
-    # 0. Enumerate all reachable files upfront so the progress bar has a
-    # meaningful denominator. We pass per-folder counts to ingestion via the
-    # progress callback below.
+    # 0. Register the job FIRST so /status reports is_ingesting=true within
+    # ~10 ms of the POST. We update `total` after we know it. Previously
+    # the file enumeration ran before _start_job, so big libraries spent
+    # 5-30 s in a "no job visible" gap and the home-page banner stayed
+    # hidden — making the user think reindex never started.
+    job_id = _start_job("reindex_all", total=0, description="Re-indexing all folders")
     folders = get_folders()
     reachable: List[str] = [f for f in folders if os.path.isdir(f)]
     for f in folders:
         if not os.path.isdir(f):
             print(f"[reindex_all] WARNING: folder unreachable, skipping: {f}")
 
+    _update_job(job_id, current="Counting files…")
     pre_total = 0
     for folder in reachable:
         try:
             pre_total += len(ingestion.get_media_files(folder))
         except Exception:
             pass
-
-    job_id = _start_job("reindex_all", total=pre_total, description="Re-indexing all folders")
+    _update_job(job_id, total=pre_total, current="")
     backup_name = f"media_backup_{int(_time.time())}"
     backup_created = False
     overall_done = 0
@@ -1048,24 +1051,45 @@ class DeleteFoldersRequest(BaseModel):
 
 @app.delete("/folders")
 def delete_folders(req: DeleteFoldersRequest):
-    """Remove folders from registry + delete their rows from DB."""
+    """Remove folders from registry + delete their rows from DB.
+
+    Heavily logged because we disable uvicorn access_log on Win (see
+    uvicorn.run below) — without explicit prints we can't see whether
+    the endpoint ran at all when a user reports "delete didn't work".
+    """
+    print(f"[/folders DELETE] paths={req.paths}", flush=True)
     with _tasks_lock:
         if tasks_in_progress > 0:
+            print("[/folders DELETE] 409 — ingest in progress", flush=True)
             raise HTTPException(status_code=409, detail="Ingest in progress. Wait then retry.")
     folders = get_folders()
     removed = []
     for p in req.paths:
         norm = platform_utils.normalize_path(p)
+        # Pre + post counts let us prove the SQL delete actually ran in
+        # the log, separate from any frontend refetch issue.
+        before = 0
+        try:
+            before = core._count_rows_under_folder(norm)
+        except Exception:
+            pass
         folders = [f for f in folders if f != p and platform_utils.normalize_path(f) != norm]
         try:
             core.delete_rows_under_folder(norm)
+            after = 0
+            try:
+                after = core._count_rows_under_folder(norm)
+            except Exception:
+                pass
+            print(f"[/folders DELETE] {p!r} normalized={norm!r} rows: {before} -> {after}", flush=True)
             removed.append(p)
         except Exception as e:
-            print(f"[/folders] delete error for {p}: {e}")
+            print(f"[/folders DELETE] error for {p}: {e!r}", flush=True)
     save_folders(folders)
     # Bump so the home page knows to refetch /media even though no ingest ran.
     if removed:
         _bump_media_generation()
+        print(f"[/folders DELETE] bumped media_generation; removed={removed}", flush=True)
     return {"removed": removed, "remaining_count": len(folders)}
 
 
@@ -1210,9 +1234,19 @@ def _whisper_downloaded() -> bool:
 
 
 def _yolo_downloaded() -> bool:
-    """YOLOv8n ONNX is ~12 MB. Require >= 9 MB so a partial / .incomplete
-    download is not treated as success."""
-    return _hf_file_cached("Xenova/yolov8n", "onnx/model.onnx", min_bytes=9 * 1024 * 1024)
+    """True if a usable yolov8n.onnx exists in any of yolo_detect's lookup
+    paths. yolo_detect owns the priority order (bundle > dev > cache).
+    """
+    try:
+        for p in yolo_detect._bundled_onnx_paths():
+            if p and os.path.isfile(p) and os.path.getsize(p) >= 9 * 1024 * 1024:
+                return True
+        cached = yolo_detect._runtime_cache_path()
+        if os.path.isfile(cached) and os.path.getsize(cached) >= 9 * 1024 * 1024:
+            return True
+    except Exception:
+        pass
+    return False
 
 
 
@@ -1364,7 +1398,12 @@ def models_progress():
         pass
     whisper_total_key = f"whisper_{whisper_size}" if f"whisper_{whisper_size}" in _EXPECTED_BYTES else "whisper_base"
     whisper_now = _hf_cache_size("faster-whisper")
-    yolo_now = _hf_cache_size("yolov8")
+    # YOLO is no longer pulled from HF — it lives in the PyInstaller
+    # bundle or in <app_data>/models/. Report 100% as soon as a
+    # usable file exists, 0% otherwise. The download is a one-shot
+    # streaming fetch that progresses too fast (~12 MB) to bother
+    # exposing byte-level progress for.
+    yolo_now = _EXPECTED_BYTES["yolo"] if _yolo_downloaded() else 0
 
     def pct(now: int, total: int) -> int:
         if total <= 0:

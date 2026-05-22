@@ -4,14 +4,27 @@ ONNX Runtime implementation — drops the torch + ultralytics dependency.
 Lazy-loads the nano ONNX model on first use. Falls back to a no-op stub
 when onnxruntime or numpy is not installed (YOLO_AVAILABLE = False).
 
-Model: `Xenova/yolov8n` from Hugging Face Hub (yolov8n.onnx, ~12 MB).
+Model source priority (first match wins):
+  1. PyInstaller bundled file at <_MEIPASS>/models/yolov8n.onnx — the
+     release path. CI downloads the file before PyInstaller bake; spec
+     ships it as a datafile.
+  2. Repo-local dev path: backend/models/yolov8n.onnx — for editors
+     running the unbundled `python main.py`.
+  3. On-demand fetch from
+     github.com/ultralytics/assets/releases/download/v8.4.0/yolov8n.onnx,
+     cached under <app_data_dir>/models/yolov8n.onnx. Used only when both
+     bundled paths are absent (e.g. dev box pre-download).
+
+Was previously sourced from HF Hub `Xenova/yolov8n` which started
+returning 401 in May 2026, killing YOLO downloads for every install.
 
 Python 3.9+.
 """
 
 import os
+import sys
 import threading
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from PIL import Image
 
@@ -41,8 +54,9 @@ _model = None
 _yolo_load_lock = threading.Lock()
 _yolo_infer_lock = threading.Lock()
 
-_HF_REPO = "Xenova/yolov8n"
-_ONNX_FILENAME = "onnx/model.onnx"   # Path inside the HF repo snapshot.
+_YOLO_URL = "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolov8n.onnx"
+_YOLO_FILENAME = "yolov8n.onnx"
+_YOLO_MIN_BYTES = 9 * 1024 * 1024  # real file ~12.3 MB
 _INPUT_SIZE = 640
 _MIN_CONFIDENCE = 0.25
 _IOU_THRESHOLD = 0.45
@@ -70,10 +84,83 @@ _COCO_CLASSES: Tuple[str, ...] = (
 # Model loader
 # ---------------------------------------------------------------------------
 
+def _bundled_onnx_paths() -> List[str]:
+    """Candidate paths where the ONNX file might live alongside the code."""
+    paths: List[str] = []
+    # PyInstaller frozen: data files live under sys._MEIPASS at the
+    # bundle root. Our spec ships backend/models/yolov8n.onnx -> models/.
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        paths.append(os.path.join(meipass, "models", _YOLO_FILENAME))
+    # Repo-local dev mode: backend/models/yolov8n.onnx next to this file.
+    here = os.path.dirname(os.path.abspath(__file__))
+    paths.append(os.path.join(here, "models", _YOLO_FILENAME))
+    return paths
+
+
+def _runtime_cache_path() -> str:
+    """Per-user writable fallback cache (used when no bundled file exists)."""
+    base = os.path.join(platform_utils.get_app_data_dir(), "models")
+    os.makedirs(base, exist_ok=True)
+    return os.path.join(base, _YOLO_FILENAME)
+
+
+def _file_ok(path: Optional[str]) -> bool:
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        return os.path.getsize(path) >= _YOLO_MIN_BYTES
+    except OSError:
+        return False
+
+
+def _download_yolo(dst: str) -> None:
+    """Fetch yolov8n.onnx from the Ultralytics GitHub release into `dst`.
+
+    Streams to a .part file then atomic-renames so a mid-download crash
+    or quit can't leave a half-written file that passes the size check.
+    """
+    import urllib.request
+    import urllib.error
+
+    tmp = dst + ".part"
+    try:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        # 30s connect timeout is plenty for a 12 MB asset.
+        with urllib.request.urlopen(_YOLO_URL, timeout=30) as resp, open(tmp, "wb") as f:
+            while True:
+                chunk = resp.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+        os.replace(tmp, dst)
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        # Don't leave a half-written .part lying around; size guard would
+        # still catch it but tidy is nicer.
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        raise RuntimeError(f"yolov8n.onnx download failed: {exc!r}") from exc
+
+
 def _resolve_onnx_path() -> str:
-    """Download (or reuse cached) YOLOv8n ONNX from Hugging Face Hub."""
-    from huggingface_hub import hf_hub_download  # lazy import
-    return hf_hub_download(repo_id=_HF_REPO, filename=_ONNX_FILENAME)
+    """Return a path to yolov8n.onnx, downloading once on demand if missing.
+
+    Priority: PyInstaller bundle > repo-local dev > user cache (download).
+    """
+    for p in _bundled_onnx_paths():
+        if _file_ok(p):
+            return p
+    cached = _runtime_cache_path()
+    if _file_ok(cached):
+        return cached
+    print(f"[yolo] fetching {_YOLO_URL} -> {cached}", flush=True)
+    _download_yolo(cached)
+    if not _file_ok(cached):
+        raise RuntimeError(f"yolov8n.onnx at {cached} is too small after download")
+    return cached
 
 
 def _get_model():

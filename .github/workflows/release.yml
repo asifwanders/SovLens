@@ -79,6 +79,24 @@ jobs:
           source venv/bin/activate
           python -c "import onnxruntime as ort; print('ort=', ort.__version__, 'providers=', ort.get_available_providers())"
 
+      - name: Download yolov8n.onnx for bundle
+        run: |
+          set -euo pipefail
+          # Bundled into the PyInstaller sidecar so end users don't need
+          # network access to run object detection. Source: Ultralytics
+          # official GitHub release (HF Hub Xenova/yolov8n started
+          # 401-ing in May 2026). ~12 MB.
+          mkdir -p backend/models
+          curl -fSL --retry 5 --retry-delay 5 \
+            -o backend/models/yolov8n.onnx \
+            https://github.com/ultralytics/assets/releases/download/v8.4.0/yolov8n.onnx
+          SIZE=$(stat -f%z backend/models/yolov8n.onnx 2>/dev/null || stat -c%s backend/models/yolov8n.onnx)
+          echo "yolov8n.onnx size: $SIZE bytes"
+          if [ "$SIZE" -lt 10000000 ]; then
+            echo "::error::yolov8n.onnx is too small ($SIZE bytes)"
+            exit 1
+          fi
+
       - name: Build backend sidecar
         run: bash frontend/src-tauri/binaries/build.sh
 
@@ -103,125 +121,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pyinstaller-warn-macos-arm
-          path: backend/build/sovlens-backend/warn-*.txt
-          if-no-files-found: ignore
-
-      - name: Install Node deps
-        working-directory: frontend
-        run: npm ci
-
-      - name: Verify signing key reaches runner
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: |
-          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            echo "::error::TAURI_SIGNING_PRIVATE_KEY secret is empty or unset"
-            exit 1
-          fi
-          echo "Secret length: ${#TAURI_SIGNING_PRIVATE_KEY} chars"
-          echo "First 24 chars: ${TAURI_SIGNING_PRIVATE_KEY:0:24}..."
-        shell: bash
-
-      - name: Build Tauri app
-        uses: tauri-apps/tauri-action@action-v0.6.2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          projectPath: frontend
-          tagName: ${{ github.ref_name }}
-          releaseName: "SovLens ${{ github.ref_name }}"
-          releaseBody: "See CHANGELOG for details."
-          includeUpdaterJson: true
-          releaseDraft: false
-          prerelease: false
-
-  # ---------------------------------------------------------------------------
-  # macOS Intel (x86_64 — macos-13)
-  # ---------------------------------------------------------------------------
-  build-macos-intel:
-    name: Build macOS Intel
-    runs-on: macos-13
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Setup Node 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Setup Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: pip-macos-intel-${{ hashFiles('backend/requirements.txt', 'backend/constraints.txt', 'backend/requirements-build.txt') }}
-          restore-keys: pip-macos-intel-
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            frontend/src-tauri/target
-          key: cargo-macos-intel-${{ hashFiles('frontend/src-tauri/Cargo.lock', 'frontend/src-tauri/Cargo.toml', 'frontend/src-tauri/tauri.conf.json') }}
-          restore-keys: cargo-macos-intel-
-
-      - name: Cache npm
-        uses: actions/cache@v4
-        with:
-          path: frontend/node_modules
-          key: npm-macos-intel-${{ hashFiles('frontend/package-lock.json') }}
-          restore-keys: npm-macos-intel-
-
-      - name: Install Python deps + PyInstaller
-        working-directory: backend
-        run: |
-          python -m venv venv
-          source venv/bin/activate
-          pip install --upgrade pip
-          pip install --retries 5 --timeout 60 -c constraints.txt -r requirements.txt
-          pip install --retries 5 --timeout 60 -c constraints.txt -r requirements-build.txt
-
-      - name: Verify ONNX Runtime
-        working-directory: backend
-        run: |
-          source venv/bin/activate
-          python -c "import onnxruntime as ort; print('ort=', ort.__version__, 'providers=', ort.get_available_providers())"
-
-      - name: Build backend sidecar
-        run: bash frontend/src-tauri/binaries/build.sh
-
-      - name: Strip quarantine + size verify (macOS)
-        run: |
-          set -euo pipefail
-          # Onedir layout: frontend/src-tauri/binaries/sovlens-backend/{sovlens-backend, _internal/...}
-          DIR="frontend/src-tauri/binaries/sovlens-backend"
-          BIN="$DIR/sovlens-backend"
-          if [ ! -d "$DIR" ]; then echo "::error::No sidecar dir at $DIR" && exit 1; fi
-          if [ ! -f "$BIN" ]; then echo "::error::No bootloader exe at $BIN" && exit 1; fi
-          xattr -dr com.apple.quarantine "$DIR" || true
-          # Aggregate-size check — see arm job comment.
-          SIZE=$(du -sk "$DIR" | awk '{print $1 * 1024}')
-          echo "sidecar dir size: $SIZE bytes"
-          if [ "$SIZE" -lt 80000000 ]; then echo "::error::sidecar dir <80MB" && exit 1; fi
-
-      - name: Upload PyInstaller warnings
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pyinstaller-warn-macos-intel
           path: backend/build/sovlens-backend/warn-*.txt
           if-no-files-found: ignore
 
@@ -377,6 +276,23 @@ jobs:
             Get-ChildItem "C:\hostedtoolcache\Python" -Directory | Where-Object { $_.Name -notlike "3.11*" } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
           }
           Get-PSDrive C | Format-Table -AutoSize
+
+      - name: Download yolov8n.onnx for bundle
+        shell: pwsh
+        run: |
+          # Bundled into the sidecar so end users don't need network for
+          # object detection. Source: Ultralytics GH release (HF
+          # Xenova/yolov8n began 401-ing in May 2026). ~12 MB.
+          New-Item -ItemType Directory -Path backend\models -Force | Out-Null
+          $url = 'https://github.com/ultralytics/assets/releases/download/v8.4.0/yolov8n.onnx'
+          $dst = 'backend\models\yolov8n.onnx'
+          Invoke-WebRequest -Uri $url -OutFile $dst -MaximumRetryCount 5 -RetryIntervalSec 5
+          $size = (Get-Item $dst).Length
+          Write-Host "yolov8n.onnx size: $size bytes"
+          if ($size -lt 10000000) {
+            Write-Error "::error::yolov8n.onnx is too small ($size bytes)"
+            exit 1
+          }
 
       - name: Build backend sidecar
         shell: cmd

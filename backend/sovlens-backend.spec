@@ -127,6 +127,21 @@ HIDDEN_IMPORTS = [
     "email.mime.text",
 ] + ort_hidden + fw_hidden + ct_hidden + ro_hidden + hh_hidden + tk_hidden + ld_hidden + sd_hidden + ff_hidden
 
+# Static model assets that ship inside the bundle. yolov8n.onnx is
+# pre-downloaded by CI (release.yml) before this spec runs — the file
+# Xenova/yolov8n on HF Hub started returning 401 in May 2026, so a
+# bundled copy is the only reliable source for end users. Skip silently
+# when missing so dev runs without a pre-downloaded file can still bake
+# a binary (yolo_detect falls back to a runtime URL fetch).
+_local_models = []
+_models_dir = os.path.join(os.path.dirname(SPEC), "models")
+_yolo_local = os.path.join(_models_dir, "yolov8n.onnx")
+if os.path.isfile(_yolo_local) and os.path.getsize(_yolo_local) > 9 * 1024 * 1024:
+    _local_models.append((_yolo_local, "models"))
+    print(f"INFO bundling {_yolo_local} -> models/yolov8n.onnx")
+else:
+    print(f"WARN no bundled yolov8n.onnx at {_yolo_local} — runtime will fetch on first use")
+
 a = Analysis(
     # Entry point — relative to spec file location (backend/).
     ["main.py"],
@@ -139,7 +154,7 @@ a = Analysis(
     datas=(
         ort_datas + fw_datas + ct_datas + ro_datas
         + hh_datas + tk_datas + ld_datas + sd_datas
-        + ff_datas
+        + ff_datas + _local_models
     ),
     hiddenimports=HIDDEN_IMPORTS,
     hookspath=[],
