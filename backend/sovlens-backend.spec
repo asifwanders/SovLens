@@ -158,13 +158,31 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# ------------------------------------------------------------------
+# onedir mode (exclude_binaries=True + COLLECT).
+#
+# Why onedir over onefile:
+#   * Onefile produces a single ~1 GB EXE that NSIS must mmap to embed.
+#     On Windows-latest CI this fails ("failed creating mmap of ...
+#     sovlens-backend.exe", os error 2) intermittently even with
+#     Defender exclusions — the file is just too large and AV scan
+#     timing windows are unreliable.
+#   * Onedir splits into many <50 MB files. NSIS streams each via
+#     normal File directives. No mmap pressure.
+#   * Onefile also extracts every DLL to %TEMP% on each launch
+#     (5-60 s on AV-scanned Win). Onedir launches instantly.
+#
+# Output layout:
+#   dist/sovlens-backend/
+#     sovlens-backend(.exe)     # bootloader EXE
+#     _internal/                # all DLLs, .so, .dylib, data files
+#       ...
+# ------------------------------------------------------------------
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="sovlens-backend",
     debug=False,
     bootloader_ignore_signals=False,
@@ -173,7 +191,6 @@ exe = EXE(
     # DLLs on Win. Net <5% size gain; disabled.
     upx=False,
     upx_exclude=[],
-    runtime_tmpdir=None,
     # console=False suppresses the terminal popup on Windows.
     # On macOS/Linux this has no visible effect.
     console=sys.platform != "win32",
@@ -182,4 +199,15 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="sovlens-backend",
 )

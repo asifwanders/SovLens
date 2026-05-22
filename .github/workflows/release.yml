@@ -4,6 +4,10 @@ on:
   push:
     tags:
       - "v*.*.*"
+  # Manual trigger so CI changes can be tested without retagging.
+  # When fired from the UI, github.ref_name will be the branch name
+  # (e.g. "main"), which tauri-action will use as the release tag.
+  workflow_dispatch:
 
 concurrency:
   group: release-${{ github.ref }}
@@ -81,12 +85,17 @@ jobs:
       - name: Strip quarantine + size verify (macOS)
         run: |
           set -euo pipefail
-          BIN="$(ls frontend/src-tauri/binaries/sovlens-backend-*-apple-darwin* 2>/dev/null | head -1)"
-          if [ -z "$BIN" ]; then echo "::error::No sidecar binary found" && exit 1; fi
-          xattr -dr com.apple.quarantine "$BIN" || true
-          SIZE=$(stat -f%z "$BIN")
-          echo "sidecar size: $SIZE bytes"
-          if [ "$SIZE" -lt 10000000 ]; then echo "::error::sidecar binary <10MB" && exit 1; fi
+          # Onedir layout: frontend/src-tauri/binaries/sovlens-backend/{sovlens-backend, _internal/...}
+          DIR="frontend/src-tauri/binaries/sovlens-backend"
+          BIN="$DIR/sovlens-backend"
+          if [ ! -d "$DIR" ]; then echo "::error::No sidecar dir at $DIR" && exit 1; fi
+          if [ ! -f "$BIN" ]; then echo "::error::No bootloader exe at $BIN" && exit 1; fi
+          xattr -dr com.apple.quarantine "$DIR" || true
+          # Aggregate-size check — bootloader EXE itself is tiny in onedir;
+          # the bulk lives in _internal/.
+          SIZE=$(du -sk "$DIR" | awk '{print $1 * 1024}')
+          echo "sidecar dir size: $SIZE bytes"
+          if [ "$SIZE" -lt 200000000 ]; then echo "::error::sidecar dir <200MB" && exit 1; fi
 
       - name: Upload PyInstaller warnings
         if: always()
@@ -196,12 +205,17 @@ jobs:
       - name: Strip quarantine + size verify (macOS)
         run: |
           set -euo pipefail
-          BIN="$(ls frontend/src-tauri/binaries/sovlens-backend-*-apple-darwin* 2>/dev/null | head -1)"
-          if [ -z "$BIN" ]; then echo "::error::No sidecar binary found" && exit 1; fi
-          xattr -dr com.apple.quarantine "$BIN" || true
-          SIZE=$(stat -f%z "$BIN")
-          echo "sidecar size: $SIZE bytes"
-          if [ "$SIZE" -lt 10000000 ]; then echo "::error::sidecar binary <10MB" && exit 1; fi
+          # Onedir layout: frontend/src-tauri/binaries/sovlens-backend/{sovlens-backend, _internal/...}
+          DIR="frontend/src-tauri/binaries/sovlens-backend"
+          BIN="$DIR/sovlens-backend"
+          if [ ! -d "$DIR" ]; then echo "::error::No sidecar dir at $DIR" && exit 1; fi
+          if [ ! -f "$BIN" ]; then echo "::error::No bootloader exe at $BIN" && exit 1; fi
+          xattr -dr com.apple.quarantine "$DIR" || true
+          # Aggregate-size check — bootloader EXE itself is tiny in onedir;
+          # the bulk lives in _internal/.
+          SIZE=$(du -sk "$DIR" | awk '{print $1 * 1024}')
+          echo "sidecar dir size: $SIZE bytes"
+          if [ "$SIZE" -lt 200000000 ]; then echo "::error::sidecar dir <200MB" && exit 1; fi
 
       - name: Upload PyInstaller warnings
         if: always()
@@ -253,12 +267,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Defender real-time scanning will quarantine / lock the freshly
-      # written PyInstaller onefile EXE (~1 GB with torch + collect_all)
-      # between the build.bat copy step and NSIS's mmap read, causing
-      # "failed creating mmap of ...sovlens-backend-...exe" + os error 2
-      # in the bundle step. Exclude the runner workspace + Python cache
-      # dirs so Defender stops touching our artifacts mid-flight.
+      # Backend is now PyInstaller onedir (many <50 MB files instead of
+      # one ~1 GB EXE), which removed the original NSIS mmap failure.
+      # We keep the Defender exclusions defensively: torch DLLs in
+      # _internal/ still individually trigger AV heuristics, and a
+      # quarantined DLL mid-build would still break the NSIS File step.
       - name: Disable Defender for workspace
         shell: pwsh
         run: |

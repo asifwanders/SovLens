@@ -1,0 +1,8 @@
+{
+  "name": "sovlens-root",
+  "private": true,
+  "description": "Repo-root scripts for SovLens. The real app lives in frontend/ and backend/.",
+  "scripts": {
+    "validate": "bash scripts/validate.sh"
+  }
+}

@@ -48,6 +48,7 @@ backend/.EasyOCR/
 # ─── Sidecar binaries ──────────────────────────────────
 # Built per-platform by CI; never commit blobs
 frontend/src-tauri/binaries/sovlens-backend-*
+frontend/src-tauri/binaries/sovlens-backend/
 !frontend/src-tauri/binaries/README.md
 !frontend/src-tauri/binaries/build.sh
 !frontend/src-tauri/binaries/build.bat

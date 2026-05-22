@@ -38,9 +38,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": [
-      "binaries/sovlens-backend"
-    ],
+    "resources": {
+      "binaries/sovlens-backend/**/*": "sovlens-backend/"
+    },
     "windows": {
       "nsis": {
         "installMode": "currentUser",

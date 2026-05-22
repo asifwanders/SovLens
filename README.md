@@ -100,7 +100,7 @@ Changing levels affects new media only. Use **Settings → Re-Index All** to rep
 
 ## Build from source
 
-See [BUILDING.md](BUILDING.md).
+See [BUILDING.md](BUILDING.md). Release procedure and pre-push checks: see [docs/RELEASING.md](docs/RELEASING.md). Before pushing a release tag, run `./scripts/validate.sh` (or `npm run validate`) — cycle is under two minutes (under ten with `cargo check`) and catches ~80% of red CI builds.
 
 Quick start (developer mode):
 

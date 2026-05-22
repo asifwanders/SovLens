@@ -7,11 +7,13 @@ import { createPortal } from "react-dom";
 const API = "http://127.0.0.1:14793";
 const POLL_MS = 1500;
 const MIN_VISIBLE_MS = 800; // never flash too fast
-// Cold-extract window for the bundled PyInstaller onefile blob (torch + CUDA,
-// ~1 GB) on first launch. On AV-scanned Windows this can take 60–120 s as
-// Defender scans every extracted DLL. 30 s was too short and surfaced
-// "Backend not responding" before the sidecar had even finished extracting.
-const BACKEND_GRACE_MS = 180_000;
+// Backend startup grace. The bundled PyInstaller backend is now onedir
+// (not onefile), so there is no per-launch %TEMP% extract — the bootloader
+// just dlopens DLLs from its own _internal/ folder. Cold launch is ~3-5 s
+// on mac, ~5-10 s on Windows (Defender may still scan-on-first-read each
+// DLL once). 60 s is generous; we used to need 180 s only because onefile
+// had to expand a 1 GB blob before the first byte of code ran.
+const BACKEND_GRACE_MS = 60_000;
 
 type ClipStatus = {
   name: string;

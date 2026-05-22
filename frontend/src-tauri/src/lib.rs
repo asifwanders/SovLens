@@ -1,6 +1,4 @@
 #[allow(unused_imports)]
-use tauri_plugin_shell::ShellExt;
-#[allow(unused_imports)]
 use tauri_plugin_updater::UpdaterExt;
 #[allow(unused_imports)]
 use tauri::Manager;
@@ -8,15 +6,19 @@ use tauri::Manager;
 use tauri::RunEvent;
 #[allow(unused_imports)]
 use std::sync::{Arc, Mutex};
-#[allow(unused_imports)]
-use tauri_plugin_shell::process::CommandChild;
 
 /// Shared handle to the spawned PyInstaller backend sidecar so we can kill it
 /// on app exit. Without this the sidecar lives on after cmd+Q (mac) / window
 /// close (win), holds port 14793, and the next launch hangs forever waiting
 /// for the port to free.
+///
+/// We moved from `app.shell().sidecar(...)` (Tauri's externalBin) to a
+/// manual `std::process::Command` invocation because PyInstaller is now in
+/// onedir mode — the executable cannot be shipped as a lone externalBin
+/// without breaking its sibling `_internal/` resolution at runtime. Onefile
+/// mode caused NSIS mmap failures on Win CI (file too large).
 #[derive(Default)]
-struct SidecarState(Arc<Mutex<Option<CommandChild>>>);
+struct SidecarState(Arc<Mutex<Option<std::process::Child>>>);
 
 #[derive(serde::Serialize)]
 pub struct UpdateInfo {
@@ -245,9 +247,16 @@ pub fn run() {
 
             // Spawn the Python backend sidecar only in release builds.
             // In dev mode, run `python main.py` separately as before.
+            //
+            // Onedir layout — the PyInstaller bootloader EXE lives at
+            //   <resource_dir>/sovlens-backend/sovlens-backend(.exe)
+            // alongside `_internal/` (which the bootloader looks for as a
+            // sibling). Tauri's externalBin would split exe and _internal
+            // across Contents/MacOS/ + Contents/Resources/ on mac, which
+            // breaks the loader. Manual std::process::Command lets us
+            // launch with the working directory and arguments we control.
             #[cfg(not(debug_assertions))]
             {
-                use tauri_plugin_shell::process::CommandEvent;
                 use std::io::Write;
 
                 // Logs dir (same as panic_logger uses)
@@ -265,68 +274,114 @@ pub fn run() {
                 {
                     let _ = writeln!(
                         f,
-                        "[{}] BOOT tauri shell starting sidecar",
+                        "[{}] BOOT tauri shell starting sidecar (onedir)",
                         chrono::Utc::now().to_rfc3339()
                     );
                 }
 
-                // Skip the bare-name metadata pre-flight. On Windows the
-                // bundled binary is `sovlens-backend.exe` (Tauri strips the
-                // target-triple and adds the OS extension when packaging),
-                // so checking for a literal `sovlens-backend` file always
-                // fails on Win. Let `shell().sidecar()` do the OS-aware
-                // lookup and surface any failure as a real error in
-                // backend.log.
-                let log_for_async = backend_log.clone();
-                let sidecar_slot = app.state::<SidecarState>().0.clone();
-                match app.shell().sidecar("sovlens-backend") {
-                    Ok(cmd) => {
-                        let cmd = cmd.args(["--port", "14793"]);
-                        match cmd.spawn() {
-                            Ok((mut rx, child)) => {
-                                // Park the CommandChild so RunEvent::Exit can
-                                // kill it. Dropping it here would leave the
-                                // sidecar holding port 14793 forever.
-                                if let Ok(mut slot) = sidecar_slot.lock() {
-                                    *slot = Some(child);
+                let exe_name = if cfg!(target_os = "windows") {
+                    "sovlens-backend.exe"
+                } else {
+                    "sovlens-backend"
+                };
+
+                let resolved = app.path()
+                    .resolve(format!("sovlens-backend/{}", exe_name),
+                             tauri::path::BaseDirectory::Resource);
+
+                match resolved {
+                    Ok(exe_path) => {
+                        // Ensure the bootloader is executable on Unix.
+                        // Tauri's bundle.resources doesn't always preserve
+                        // the +x bit; setting it idempotently is cheap and
+                        // makes the spawn robust across mac/linux packagers.
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            if let Ok(meta) = std::fs::metadata(&exe_path) {
+                                let mut perms = meta.permissions();
+                                if perms.mode() & 0o111 == 0 {
+                                    perms.set_mode(perms.mode() | 0o755);
+                                    let _ = std::fs::set_permissions(&exe_path, perms);
                                 }
+                            }
+                        }
+
+                        let mut cmd = std::process::Command::new(&exe_path);
+                        cmd.args(["--port", "14793"])
+                            .stdout(std::process::Stdio::piped())
+                            .stderr(std::process::Stdio::piped());
+
+                        // Hide the console window on Windows. Without
+                        // CREATE_NO_WINDOW (0x08000000) a conhost flashes
+                        // up every launch because the bootloader is a
+                        // console subsystem binary.
+                        #[cfg(target_os = "windows")]
+                        {
+                            use std::os::windows::process::CommandExt;
+                            cmd.creation_flags(0x08000000);
+                        }
+
+                        match cmd.spawn() {
+                            Ok(mut child) => {
                                 if let Ok(mut f) = std::fs::OpenOptions::new()
                                     .create(true).append(true).open(&backend_log)
                                 {
                                     let _ = writeln!(
                                         f,
-                                        "[{}] BOOT sidecar spawned",
-                                        chrono::Utc::now().to_rfc3339()
+                                        "[{}] BOOT sidecar spawned pid={} exe={}",
+                                        chrono::Utc::now().to_rfc3339(),
+                                        child.id(),
+                                        exe_path.display()
                                     );
                                 }
-                                // Forward sidecar stdout/stderr to backend.log.
-                                tauri::async_runtime::spawn(async move {
-                                    let mut f = std::fs::OpenOptions::new()
-                                        .create(true).append(true).open(&log_for_async).ok();
-                                    while let Some(event) = rx.recv().await {
-                                        if let Some(ref mut file) = f {
-                                            let ts = chrono::Utc::now().to_rfc3339();
-                                            let _ = match event {
-                                                CommandEvent::Stdout(b) => writeln!(
-                                                    file, "[{}] OUT {}", ts,
-                                                    String::from_utf8_lossy(&b).trim_end()
-                                                ),
-                                                CommandEvent::Stderr(b) => writeln!(
-                                                    file, "[{}] ERR {}", ts,
-                                                    String::from_utf8_lossy(&b).trim_end()
-                                                ),
-                                                CommandEvent::Error(e) => writeln!(
-                                                    file, "[{}] ERR spawn-error: {}", ts, e
-                                                ),
-                                                CommandEvent::Terminated(p) => writeln!(
-                                                    file, "[{}] ERR sidecar terminated code={:?} signal={:?}",
-                                                    ts, p.code, p.signal
-                                                ),
-                                                _ => Ok(()),
-                                            };
+
+                                // Drain stdout/stderr on background threads
+                                // so the pipe buffer never fills and stalls
+                                // the backend at the first ~64 KB of logs.
+                                let stdout = child.stdout.take();
+                                let stderr = child.stderr.take();
+                                let log_out = backend_log.clone();
+                                let log_err = backend_log.clone();
+                                if let Some(out) = stdout {
+                                    std::thread::spawn(move || {
+                                        use std::io::{BufRead, BufReader};
+                                        let reader = BufReader::new(out);
+                                        for line in reader.lines().map_while(Result::ok) {
+                                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                                .create(true).append(true).open(&log_out)
+                                            {
+                                                let _ = writeln!(
+                                                    f, "[{}] OUT {}",
+                                                    chrono::Utc::now().to_rfc3339(), line
+                                                );
+                                            }
                                         }
-                                    }
-                                });
+                                    });
+                                }
+                                if let Some(err) = stderr {
+                                    std::thread::spawn(move || {
+                                        use std::io::{BufRead, BufReader};
+                                        let reader = BufReader::new(err);
+                                        for line in reader.lines().map_while(Result::ok) {
+                                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                                .create(true).append(true).open(&log_err)
+                                            {
+                                                let _ = writeln!(
+                                                    f, "[{}] ERR {}",
+                                                    chrono::Utc::now().to_rfc3339(), line
+                                                );
+                                            }
+                                        }
+                                    });
+                                }
+
+                                // Park the Child so RunEvent::Exit can kill
+                                // it. Dropping here would leak port 14793.
+                                let sidecar_slot = app.state::<SidecarState>().0.clone();
+                                if let Ok(mut slot) = sidecar_slot.lock() {
+                                    *slot = Some(child);
+                                }
                             }
                             Err(e) => {
                                 if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -334,9 +389,10 @@ pub fn run() {
                                 {
                                     let _ = writeln!(
                                         f,
-                                        "[{}] ERR sidecar spawn failed: {}",
+                                        "[{}] ERR sidecar spawn failed: {} (exe={})",
                                         chrono::Utc::now().to_rfc3339(),
-                                        e
+                                        e,
+                                        exe_path.display()
                                     );
                                 }
                             }
@@ -348,7 +404,7 @@ pub fn run() {
                         {
                             let _ = writeln!(
                                 f,
-                                "[{}] ERR sidecar create failed: {}",
+                                "[{}] ERR resource path resolve failed: {}",
                                 chrono::Utc::now().to_rfc3339(),
                                 e
                             );
@@ -368,8 +424,10 @@ pub fn run() {
             // child running and the next launch hangs.
             if let RunEvent::ExitRequested { .. } | RunEvent::Exit = event {
                 if let Ok(mut slot) = sidecar_slot_for_exit.lock() {
-                    if let Some(child) = slot.take() {
+                    if let Some(mut child) = slot.take() {
                         let _ = child.kill();
+                        // Reap so we don't leave a zombie on Unix.
+                        let _ = child.wait();
                     }
                 }
             }
