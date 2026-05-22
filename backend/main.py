@@ -1058,6 +1058,84 @@ def models_status():
     }
 
 
+# Expected on-disk sizes per model — used to compute a progress percent
+# while a download is in flight. HF doesn't expose per-file byte progress
+# without hooking tqdm, but walking the cache dir and dividing by an
+# expected total gives a reasonable bar (final 5-10% sometimes lingers as
+# the `.incomplete` file finalises).
+_EXPECTED_BYTES = {
+    "clip": 900 * 1024 * 1024,
+    "whisper_base": 150 * 1024 * 1024,
+    "whisper_small": 500 * 1024 * 1024,
+    "whisper_medium": 1500 * 1024 * 1024,
+    "whisper_large": 3000 * 1024 * 1024,
+    "yolo": 12 * 1024 * 1024,
+}
+
+
+def _dir_bytes(path: str) -> int:
+    """Sum file bytes under `path`. Returns 0 if missing. Safe against
+    in-flight .incomplete files (counted toward progress)."""
+    from pathlib import Path
+    p = Path(path)
+    if not p.exists():
+        return 0
+    total = 0
+    try:
+        for child in p.rglob("*"):
+            if child.is_file():
+                try:
+                    total += child.stat().st_size
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+def _hf_cache_size(*needles: str) -> int:
+    """Total bytes across any HF cache dirs whose name contains a needle."""
+    from pathlib import Path
+    hf_hub = Path(os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))) / "hub"
+    if not hf_hub.exists():
+        return 0
+    sanitized = [n.replace("/", "_").replace("-", "").lower() for n in needles]
+    total = 0
+    for child in hf_hub.iterdir():
+        if not child.is_dir():
+            continue
+        cname = child.name.replace("-", "").lower()
+        if any(n in cname for n in sanitized):
+            total += _dir_bytes(str(child))
+    return total
+
+
+@app.get("/models/progress")
+def models_progress():
+    """Bytes-on-disk vs expected-total per model. Cheap (filesystem walk)."""
+    clip_now = _hf_cache_size("clip-vit-large-patch14", "clip-ViT-L-14")
+    whisper_size = "base"
+    try:
+        whisper_size = (config.get_current_level_params().get("whisper_model") or "base").lower()
+    except Exception:
+        pass
+    whisper_total_key = f"whisper_{whisper_size}" if f"whisper_{whisper_size}" in _EXPECTED_BYTES else "whisper_base"
+    whisper_now = _hf_cache_size("faster-whisper")
+    yolo_now = _hf_cache_size("yolov8")
+
+    def pct(now: int, total: int) -> int:
+        if total <= 0:
+            return 0
+        return min(100, int(round(100.0 * now / total)))
+
+    return {
+        "clip":    {"bytes_now": clip_now,    "bytes_total": _EXPECTED_BYTES["clip"],            "percent": pct(clip_now, _EXPECTED_BYTES["clip"])},
+        "whisper": {"bytes_now": whisper_now, "bytes_total": _EXPECTED_BYTES[whisper_total_key], "percent": pct(whisper_now, _EXPECTED_BYTES[whisper_total_key])},
+        "yolo":    {"bytes_now": yolo_now,    "bytes_total": _EXPECTED_BYTES["yolo"],            "percent": pct(yolo_now, _EXPECTED_BYTES["yolo"])},
+        "ocr":     {"bytes_now": 0,           "bytes_total": 0,                                   "percent": 100},
+    }
+
+
 class WarmupRequest(BaseModel):
     model: str  # "clip" | "whisper" | "yolo" | "ocr"
 

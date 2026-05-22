@@ -20,12 +20,18 @@ type ClipStatus = {
   loaded: boolean;
   downloaded: boolean;
 };
+type ClipProgress = {
+  bytes_now: number;
+  bytes_total: number;
+  percent: number;
+};
 
 export default function SplashScreen({ onComplete }: { onComplete: () => void }) {
   const [isVisible, setIsVisible] = useState(true);
   const [mounted, setMounted] = useState(false);
   const [status, setStatus] = useState<"booting" | "downloading" | "ready" | "error">("booting");
   const [statusMsg, setStatusMsg] = useState<string>("Starting backend…");
+  const [clipProg, setClipProg] = useState<ClipProgress | null>(null);
   // Lazy-init in effect to keep render pure (Date.now() is impure).
   const mountedAt = useRef<number>(0);
   const warmupFired = useRef(false);
@@ -73,7 +79,25 @@ export default function SplashScreen({ onComplete }: { onComplete: () => void })
           });
         }
         setStatus("downloading");
-        setStatusMsg("Downloading visual search model (~890 MB)…");
+        // Fetch byte progress (best-effort; backend may not have it yet on first ping)
+        try {
+          const pr = await fetch(`${API}/models/progress`, { cache: "no-store" });
+          if (pr.ok) {
+            const pj = (await pr.json()) as { clip: ClipProgress };
+            setClipProg(pj.clip);
+            const mb = (b: number) => (b / (1024 * 1024)).toFixed(0);
+            const total = pj.clip.bytes_total;
+            if (total > 0) {
+              setStatusMsg(`Downloading visual search model — ${mb(pj.clip.bytes_now)} / ${mb(total)} MB`);
+            } else {
+              setStatusMsg("Downloading visual search model (~890 MB)…");
+            }
+          } else {
+            setStatusMsg("Downloading visual search model (~890 MB)…");
+          }
+        } catch {
+          setStatusMsg("Downloading visual search model (~890 MB)…");
+        }
       } catch {
         // Backend not yet reachable. Show booting until grace expires.
         const elapsed = Date.now() - mountedAt.current;
@@ -123,15 +147,22 @@ export default function SplashScreen({ onComplete }: { onComplete: () => void })
             <div className="w-full">
               {(status === "booting" || status === "downloading") && (
                 <div className="h-1 w-full bg-black/10 dark:bg-white/10 rounded-full overflow-hidden mb-3">
-                  <motion.div
-                    className="h-full w-1/3 bg-accent"
-                    animate={{ x: ["-100%", "300%"] }}
-                    transition={{
-                      duration: 1.4,
-                      repeat: Infinity,
-                      ease: "easeInOut",
-                    }}
-                  />
+                  {status === "downloading" && clipProg && clipProg.bytes_total > 0 ? (
+                    <div
+                      className="h-full bg-accent transition-[width] duration-500"
+                      style={{ width: `${clipProg.percent}%` }}
+                    />
+                  ) : (
+                    <motion.div
+                      className="h-full w-1/3 bg-accent"
+                      animate={{ x: ["-100%", "300%"] }}
+                      transition={{
+                        duration: 1.4,
+                        repeat: Infinity,
+                        ease: "easeInOut",
+                      }}
+                    />
+                  )}
                 </div>
               )}
               <p className="text-center text-sm text-muted-text">{statusMsg}</p>

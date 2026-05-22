@@ -35,6 +35,17 @@ interface ModelsStatusResponse {
   yolo:    ModelStatus;
   ocr:     ModelStatus;
 }
+interface ModelProgress {
+  bytes_now: number;
+  bytes_total: number;
+  percent: number;
+}
+interface ModelsProgressResponse {
+  clip:    ModelProgress;
+  whisper: ModelProgress;
+  yolo:    ModelProgress;
+  ocr:     ModelProgress;
+}
 
 const API_BASE = "http://127.0.0.1:14793";
 
@@ -65,6 +76,7 @@ export default function SettingsPage() {
   // AI model status. `warming` is a Set so multiple models can show
   // a "Downloading…" state in parallel (e.g. switching to Extreme).
   const [modelStatus, setModelStatus] = useState<ModelsStatusResponse | null>(null);
+  const [modelProgress, setModelProgress] = useState<ModelsProgressResponse | null>(null);
   const [warming, setWarming] = useState<Set<string>>(new Set());
   const warmingRef = useRef<Set<string>>(new Set());
 
@@ -167,6 +179,24 @@ export default function SettingsPage() {
     const interval = setInterval(() => { void fetchModelStatus(); }, 3000);
     return () => clearInterval(interval);
   }, [fetchModelStatus]);
+
+  // Poll /models/progress every 1.5s — used for download progress bars.
+  // Endpoint just walks the HF cache dir; cheap.
+  useEffect(() => {
+    const tick = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/models/progress`);
+        if (!res.ok) return;
+        const data = (await res.json()) as ModelsProgressResponse;
+        setModelProgress(data);
+      } catch {
+        /* backend not ready */
+      }
+    };
+    void tick();
+    const interval = setInterval(() => { void tick(); }, 1500);
+    return () => clearInterval(interval);
+  }, []);
 
   const warmup = useCallback(async (key: string) => {
     if (warmingRef.current.has(key)) return;
@@ -414,12 +444,26 @@ export default function SettingsPage() {
                         Downloaded
                       </span>
                     ) : isWarming ? (
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs text-foreground/60">Downloading&hellip;</span>
-                        <div className="w-24 h-1 bg-foreground/10 rounded overflow-hidden">
-                          <div className="h-full bg-accent animate-pulse w-full" />
-                        </div>
-                      </div>
+                      (() => {
+                        const prog = modelProgress?.[m.key as keyof ModelsProgressResponse];
+                        const pct = prog?.percent ?? 0;
+                        const mb = (b: number) => (b / (1024 * 1024)).toFixed(0);
+                        const sizeStr = prog && prog.bytes_total > 0
+                          ? `${mb(prog.bytes_now)} / ${mb(prog.bytes_total)} MB`
+                          : "Downloading…";
+                        return (
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-foreground/60 tabular-nums">{sizeStr}</span>
+                            <div className="w-24 h-1 bg-foreground/10 rounded overflow-hidden">
+                              <div
+                                className="h-full bg-accent transition-[width] duration-500"
+                                style={{ width: `${pct}%` }}
+                              />
+                            </div>
+                            <span className="text-xs text-foreground/60 tabular-nums w-8 text-right">{pct}%</span>
+                          </div>
+                        );
+                      })()
                     ) : (
                       <button
                         onClick={() => warmup(m.key)}
