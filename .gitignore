@@ -69,3 +69,4 @@ frontend/src-tauri/binaries/sovlens-backend.tar.gz
 tauri-updater-private.key
 secrets/
 backend/yolov8n.pt
+frontend/src-tauri/binaries/sovlens-backend.zip
