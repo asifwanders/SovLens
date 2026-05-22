@@ -51,8 +51,13 @@ fi
 # previous build don't linger and bloat the bundle / get out of sync.
 rm -rf "${DST_DIR}"
 mkdir -p "${DST_DIR}"
-# -a preserves perms + symlinks (libtorch ships .dylib symlinks on mac).
-cp -a "${SRC_DIR}/." "${DST_DIR}/"
+# -RL: recurse + DEREFERENCE all symlinks. PyInstaller onedir on macOS
+# includes PIL/.dylibs/ and torch/.dylibs/ symlink farms (libXau.6.dylib
+# -> libXau.dylib etc). Tauri's build script chokes registering each as
+# `rerun-if-changed` because the resolved target ends up registered twice.
+# Dereferencing duplicates real files into the destination (~30-80 MB
+# larger) but eliminates the symlink confusion entirely.
+cp -RL "${SRC_DIR}/." "${DST_DIR}/"
 chmod +x "${DST_DIR}/sovlens-backend"
 
 # Total-folder size guard. The onedir output is many files; the loader EXE

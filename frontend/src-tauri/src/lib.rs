@@ -378,8 +378,9 @@ pub fn run() {
 
                                 // Park the Child so RunEvent::Exit can kill
                                 // it. Dropping here would leak port 14793.
-                                let sidecar_slot = app.state::<SidecarState>().0.clone();
-                                if let Ok(mut slot) = sidecar_slot.lock() {
+                                {
+                                    let sidecar_slot = app.state::<SidecarState>().0.clone();
+                                    let mut slot = sidecar_slot.lock().expect("sidecar mutex poisoned");
                                     *slot = Some(child);
                                 }
                             }
