@@ -143,7 +143,12 @@ export default function FoldersPage() {
             No folders added yet. Click &ldquo;Add Folder&rdquo; to start indexing.
           </div>
         ) : (
-          <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-7 xl:grid-cols-8 2xl:grid-cols-9 gap-2.5">
+          // Auto-fill grid — matches MediaGrid (see comment there) so
+          // folder tiles cap at ~180 px regardless of monitor width.
+          <div
+            className="grid gap-2.5"
+            style={{ gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))" }}
+          >
             {folders.map((f) => (
               <div
                 key={f.normalized_path}

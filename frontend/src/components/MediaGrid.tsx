@@ -82,8 +82,11 @@ function MediaTile({ item, onItemClick }: MediaTileProps) {
       )}
 
       {showSnippet && (
+        // Hover-only so OCR / transcript text doesn't permanently
+        // disfigure the thumbnail. tooltip via `title` still gives
+        // keyboard / mobile users access.
         <div
-          className="absolute bottom-0 left-0 right-0 bg-black/60 backdrop-blur-sm px-2 py-1"
+          className="absolute bottom-0 left-0 right-0 bg-black/65 backdrop-blur-sm px-2 py-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none"
           title={item.text_snippet ?? undefined}
         >
           <p className={`text-white text-[10px] leading-tight line-clamp-2${item.type === "audio_segment" ? " italic" : ""}`}>
@@ -153,7 +156,19 @@ export default function MediaGrid({ items, onLoadMore, hasMore, onItemClick }: M
 
   return (
     <div className="w-full h-full pb-20">
-      <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-7 xl:grid-cols-8 2xl:grid-cols-9 gap-2.5">
+      {/*
+        Auto-fill grid caps tile size regardless of monitor width.
+        Tailwind's fixed breakpoint columns (grid-cols-3...9) were
+        producing huge tiles on 27" 1440p+ at fullscreen because the
+        column count plateaued at 9 while the available width kept
+        growing — each cell stretched to ~280-320 px. minmax(180px, 1fr)
+        keeps tiles between 180 px (lower bound) and 1fr (only one row
+        at narrow widths) and adds more columns as space allows.
+      */}
+      <div
+        className="grid gap-2.5"
+        style={{ gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))" }}
+      >
         {items.map((item) => (
           <MediaTile key={item.id} item={item} onItemClick={onItemClick} />
         ))}
