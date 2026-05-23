@@ -43,6 +43,13 @@ _whisper_model_name: str = ""
 _whisper_load_lock = threading.Lock()
 
 
+# Process-lifetime cache of (device, compute_type). Probe result is
+# stable — CUDA visibility doesn't change once the process is up — so
+# detecting on every /status poll wastes ctranslate2 cycles AND spams
+# the log (~2 lines/sec at our poll cadence).
+_DEVICE_CACHE: Optional[Tuple[str, str]] = None
+
+
 def _detect_device() -> Tuple[str, str]:
     """Pick (device, compute_type) for faster-whisper without importing torch.
 
@@ -50,18 +57,22 @@ def _detect_device() -> Tuple[str, str]:
     - windows/linux + CUDA: cuda + float16
     - else: CPU + int8
 
-    CUDA presence is probed via ctranslate2.get_cuda_device_count(), so we
-    don't pull torch into this module.
+    First call logs the chosen device at INFO so backend.log records the
+    reason for any CPU fallback. Subsequent calls return the cached
+    value silently — /status polls this every 1.5 s.
 
-    Loud diagnostic at INFO so backend.log records WHY the fallback was
-    chosen — silent CPU fallback was a frequent end-user "why is GPU not
-    used" question. CTranslate2 needs CUDA 12 + cuDNN 9 runtime DLLs on
-    PATH; the wheel only bundles cudart + cublas. cuDNN must be
-    installed by the user separately (or we'd add ~500 MB to the bundle).
+    CTranslate2 needs CUDA 12 + cuDNN 9 runtime DLLs on PATH; the wheel
+    only bundles cudart + cublas. Our PyInstaller bundle ships
+    nvidia-cudnn-cu12 on Win + registers its bin dir at sidecar boot.
     """
+    global _DEVICE_CACHE
+    if _DEVICE_CACHE is not None:
+        return _DEVICE_CACHE
+
     if sys.platform == "darwin":
         logger.info("[whisper-device] cpu/int8 — mac (CTranslate2 has no MPS backend)")
-        return ("cpu", "int8")
+        _DEVICE_CACHE = ("cpu", "int8")
+        return _DEVICE_CACHE
     try:
         import ctranslate2  # type: ignore
         try:
@@ -73,17 +84,20 @@ def _detect_device() -> Tuple[str, str]:
                 "or accept CPU transcription",
                 probe_exc,
             )
-            return ("cpu", "int8")
+            _DEVICE_CACHE = ("cpu", "int8")
+            return _DEVICE_CACHE
         if n > 0:
             logger.info("[whisper-device] cuda/float16 — %d GPU(s) found", n)
-            return ("cuda", "float16")
+            _DEVICE_CACHE = ("cuda", "float16")
+            return _DEVICE_CACHE
         logger.info(
             "[whisper-device] cpu/int8 — ctranslate2 reports 0 CUDA devices "
             "(driver too old OR cuDNN 9 missing OR not a CUDA wheel)"
         )
     except ImportError as exc:
         logger.warning("[whisper-device] cpu/int8 — ctranslate2 not importable: %s", exc)
-    return ("cpu", "int8")
+    _DEVICE_CACHE = ("cpu", "int8")
+    return _DEVICE_CACHE
 
 
 def _get_whisper_model(name: str = "base"):
