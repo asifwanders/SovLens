@@ -112,7 +112,7 @@ def _get_whisper_model(name: str = "base"):
     safe for concurrent .transcribe(), but ingestion serializes audio passes,
     so a single cached instance is sufficient.
     """
-    global _whisper_model, _whisper_model_name
+    global _whisper_model, _whisper_model_name, _whisper_loaded_device
     if not WHISPER_AVAILABLE:
         raise NotImplementedError(_INSTALL_HINT)
     if _whisper_model is None or _whisper_model_name != name:
@@ -121,12 +121,48 @@ def _get_whisper_model(name: str = "base"):
             if _whisper_model is None or _whisper_model_name != name:
                 device, compute_type = _detect_device()
                 logger.info(
-                    "Loading faster-whisper model name=%s device=%s compute_type=%s",
+                    "[whisper-load] requested name=%s device=%s compute_type=%s",
                     name, device, compute_type,
                 )
-                _whisper_model = _WhisperModel(name, device=device, compute_type=compute_type)
+                # If the requested device is CUDA, try it first. If the
+                # constructor raises (cuDNN init crash, OOM, driver
+                # mismatch), retry on CPU rather than silently leaving
+                # _whisper_model=None — that would make every later
+                # call re-attempt the same broken cuda construction.
+                try:
+                    _whisper_model = _WhisperModel(name, device=device, compute_type=compute_type)
+                    _whisper_loaded_device = device
+                    logger.info(
+                        "[whisper-load] SUCCESS name=%s device=%s compute_type=%s",
+                        name, device, compute_type,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[whisper-load] device=%s FAILED (%s) — retrying on cpu/int8",
+                        device, exc,
+                    )
+                    _whisper_model = _WhisperModel(name, device="cpu", compute_type="int8")
+                    _whisper_loaded_device = "cpu"
+                    logger.info(
+                        "[whisper-load] SUCCESS name=%s device=cpu compute_type=int8 (fallback)",
+                        name,
+                    )
                 _whisper_model_name = name
     return _whisper_model
+
+
+_whisper_loaded_device: Optional[str] = None
+
+
+def get_loaded_device() -> Optional[str]:
+    """Device the currently-cached WhisperModel was actually built with.
+
+    Different from _detect_device() (which is the PREFERRED device): a
+    constructor failure on CUDA falls back to CPU and that fact is
+    recorded here so /status can surface "Whisper using CPU despite
+    GPU detected" to the user.
+    """
+    return _whisper_loaded_device
 
 # ---------------------------------------------------------------------------
 # Audio extraction

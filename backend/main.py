@@ -360,18 +360,24 @@ def get_status():
     # Cheap probe of CTranslate2's CUDA visibility; result is stable for
     # a given process so cache after first call.
     whisper_device = None
+    whisper_loaded_device = None
     if audio_ingest.WHISPER_AVAILABLE:
         try:
             whisper_device, _ = audio_ingest._detect_device()
         except Exception:
             whisper_device = None
+        try:
+            whisper_loaded_device = audio_ingest.get_loaded_device()
+        except Exception:
+            whisper_loaded_device = None
     return {
         "is_ingesting": tasks_in_progress > 0,
         "tasks": tasks_in_progress,
         "jobs": jobs_snapshot,           # per-job progress (see /jobs for the same)
         "media_generation": media_gen,   # bumps on every add/delete so UI knows to refetch
         "whisper_available": audio_ingest.WHISPER_AVAILABLE,
-        "whisper_device": whisper_device,  # "cuda" | "cpu" | None — for UI hint
+        "whisper_device": whisper_device,                  # detected / preferred
+        "whisper_loaded_device": whisper_loaded_device,    # actually-loaded WhisperModel device (None if not yet loaded)
         "heic_supported": ingestion.is_heic_supported(),
         "yolo_available": yolo_detect.YOLO_AVAILABLE,
         "ocr_available": ocr_detect.OCR_AVAILABLE,
